@@ -1,0 +1,52 @@
+Benchmarking Standard fwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard bwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking cuDNN fwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN bwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking FA4 fwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 bwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking Standard fwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard bwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking cuDNN fwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN bwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking FA4 fwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 bwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking Standard fwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard bwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking cuDNN fwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN bwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking FA4 fwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 bwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking Standard fwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard bwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking cuDNN fwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN bwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking FA4 fwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 bwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking Standard fwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard bwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking cuDNN fwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN bwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16, deterministic=False
+Benchmarking FA4 fwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 bwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16, deterministic=False
+
+============================================================================================
+  FWD (ms / TFLOPS / MFU%)
+============================================================================================
+     hdim causal batch seqlen             Standard                cuDNN                  FA4
+--------------------------------------------------------------------------------------------
+      128  False    32   1024        1.94/141/6.3%      0.21/1322/58.7%      0.21/1334/59.3%
+      128  False    16   2048        5.33/103/4.6%      0.38/1438/63.9%      0.38/1443/64.1%
+      128  False     8   4096        8.40/131/5.8%      0.73/1497/66.5%      0.73/1508/67.0%
+      128  False     4   8192       19.23/114/5.1%      1.44/1530/68.0%      1.42/1550/68.9%
+      128  False     2  16384       19.87/221/9.8%      2.84/1550/68.9%      2.79/1574/70.0%
+
+============================================================================================
+  BWD (ms / TFLOPS / MFU%)
+============================================================================================
+     hdim causal batch seqlen             Standard                cuDNN                  FA4
+--------------------------------------------------------------------------------------------
+      128  False    32   1024        3.45/199/8.9%       0.81/846/37.6%       0.79/870/38.7%
+      128  False    16   2048       4.24/324/14.4%      1.32/1038/46.1%      1.26/1090/48.5%
+      128  False     8   4096       7.58/363/16.1%      2.37/1162/51.6%      2.22/1241/55.1%
+      128  False     4   8192      14.44/381/16.9%      4.46/1233/54.8%      4.11/1339/59.5%
+      128  False     2  16384      27.49/400/17.8%      9.36/1175/52.2%      8.41/1308/58.1%

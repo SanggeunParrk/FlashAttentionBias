@@ -1,0 +1,33 @@
+"""Flash Attention CUTE (CUDA Template Engine) implementation."""
+
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("fa4")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
+
+import cutlass.cute as cute
+
+from FA4_fp32.interface import (
+    flash_attn_func,
+    flash_attn_varlen_func,
+)
+
+from FA4_fp32.infra.cute_dsl_utils import cute_compile_patched
+
+# Patch cute.compile to optionally dump SASS
+cute.compile = cute_compile_patched
+
+
+from FA4_fp32.reference import attention_fp32
+from FA4_fp32.verify import compare, Shape, DEFAULT_SHAPES
+
+__all__ = [
+    "flash_attn_func",
+    "flash_attn_varlen_func",
+    "attention_fp32",
+    "compare",
+    "Shape",
+    "DEFAULT_SHAPES",
+]

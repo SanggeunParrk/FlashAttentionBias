@@ -1,0 +1,23 @@
+[workspace]
+channels = ["conda-forge"]
+name = "flash-attention"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[dependencies]
+python = "3.12.*"
+pip = ">=26.0.1,<27"
+
+[pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu130"]
+
+[pypi-dependencies]
+torch = "*"
+
+[activation.env]
+CUDA_VISIBLE_DEVICES = "0"
+FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED = "1"
+
+[tasks]
+install-fa4 = "pip install --extra-index-url https://download.pytorch.org/whl/cu130 -e ./flash_attn/cute[dev,cu13]"
+smoke = { cmd = "python -c 'from flash_attn.cute import flash_attn_func; import torch; print(\"ok\", torch.cuda.get_device_name(0), torch.version.cuda)'", cwd = "/tmp" }

@@ -1,0 +1,26 @@
+Benchmarking Standard fwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN fwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 fwd, hdim=128, seqlen=1024, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard fwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN fwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 fwd, hdim=128, seqlen=2048, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard fwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN fwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 fwd, hdim=128, seqlen=4096, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard fwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN fwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 fwd, hdim=128, seqlen=8192, causal=False, nheads=16, nheads_kv=16
+Benchmarking Standard fwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16
+Benchmarking cuDNN fwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16
+Benchmarking FA4 fwd, hdim=128, seqlen=16384, causal=False, nheads=16, nheads_kv=16
+
+============================================================================================
+  FWD (ms / TFLOPS / MFU%)
+============================================================================================
+     hdim causal batch seqlen             Standard                cuDNN                  FA4
+--------------------------------------------------------------------------------------------
+      128  False    32   1024        1.94/142/6.3%      0.21/1324/58.8%      0.20/1362/60.5%
+      128  False    16   2048        5.33/103/4.6%      0.38/1438/63.9%      0.38/1460/64.9%
+      128  False     8   4096        8.40/131/5.8%      0.73/1498/66.6%      0.72/1521/67.6%
+      128  False     4   8192       19.22/114/5.1%      1.44/1530/68.0%      1.41/1560/69.3%
+      128  False     2  16384       19.86/221/9.8%      2.84/1550/68.9%      2.77/1586/70.5%
