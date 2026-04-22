@@ -33,23 +33,39 @@ from cutlass.cutlass_dsl import BaseDSL
 
 from quack import copy_utils, layout_utils
 
-from FA4_fp32.core.paged_kv import PagedKVManager
 from FA4_fp32.infra.cute_dsl_utils import assume_tensor_aligned
 from FA4_fp32.core import utils
 from FA4_fp32.core import pipeline as pipeline_custom
 import cutlass.pipeline as cutlass_pipeline
 from FA4_fp32.core.mask import AttentionMask
-from FA4_fp32.core.softmax import SoftmaxSm100, apply_score_mod_inner
+from FA4_fp32.core.softmax import SoftmaxSm100
 from FA4_fp32.core.seqlen_info import SeqlenInfoQK
 from FA4_fp32.core.block_info import BlockInfo
-from FA4_fp32.sparsity.block_sparsity import BlockSparseTensors
-from FA4_fp32.sparsity.block_sparse_utils import (
-    get_total_block_count,
-    produce_block_sparse_loads_sm100,
-    softmax_block_sparse_sm100,
-    handle_block_sparse_empty_tile_correction_sm100,
-)
-from FA4_fp32.core.pack_gqa import PackGQA, pack_gqa_layout
+
+# Features removed in the B200 simplified build. Kept as sentinels so dead
+# constexpr branches in the kernel body still parse cleanly; any live call
+# path to them is a bug.
+class _Removed:
+    def __init__(self, name): self._name = name
+    def __call__(self, *a, **kw): raise RuntimeError(f"{self._name} was removed in B200 build")
+    def __getattr__(self, attr):
+        # Cooperate with typing.Optional / typing_extensions introspection by
+        # returning AttributeError for dunders instead of raising RuntimeError.
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        raise RuntimeError(f"{self._name}.{attr} was removed in B200 build")
+
+from typing import Any as _Any
+PagedKVManager = _Removed("PagedKVManager")
+# Only used as type hint in removed code paths.
+BlockSparseTensors = _Any
+get_total_block_count = _Removed("get_total_block_count")
+produce_block_sparse_loads_sm100 = _Removed("produce_block_sparse_loads_sm100")
+softmax_block_sparse_sm100 = _Removed("softmax_block_sparse_sm100")
+handle_block_sparse_empty_tile_correction_sm100 = _Removed("handle_block_sparse_empty_tile_correction_sm100")
+PackGQA = _Removed("PackGQA")
+pack_gqa_layout = _Removed("pack_gqa_layout")
+apply_score_mod_inner = _Removed("apply_score_mod_inner")
 from FA4_fp32.arch import mma_sm100_desc as sm100_desc
 from FA4_fp32.arch import blackwell_helpers as sm100_utils
 from FA4_fp32.core.named_barrier import NamedBarrierFwdSm100
@@ -98,23 +114,24 @@ class FlashAttentionForwardSm100:
         head_dim: int,
         head_dim_v: Optional[int] = None,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
-        is_causal: bool = False,
-        is_local: bool = False,
-        is_split_kv: bool = False,
-        pack_gqa: bool = False,
-        q_subtile_factor: int | None = None,
         m_block_size: int = 128,
         n_block_size: int = 128,
         q_stage: cutlass.Constexpr[int] = 2,
         is_persistent: bool = True,
-        score_mod: cutlass.Constexpr | None = None,
-        mask_mod: cutlass.Constexpr | None = None,
-        has_aux_tensors: cutlass.Constexpr = False,
-        paged_kv_non_tma: bool = False,
-        is_varlen_q: bool = False,
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
     ):
+        # Features removed in B200 build: fixed to False/None below.
+        is_causal = False
+        is_local = False
+        is_split_kv = False
+        pack_gqa = False
+        q_subtile_factor = None
+        score_mod = None
+        mask_mod = None
+        has_aux_tensors = False
+        paged_kv_non_tma = False
+        is_varlen_q = False
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size

@@ -20,7 +20,15 @@ from quack import sm90_utils
 
 from FA4_fp32.core import utils
 from FA4_fp32.infra.cute_dsl_utils import assume_tensor_aligned
-from FA4_fp32.arch import ampere_helpers as sm80_utils
+# Removed SM80 helpers; kept as sentinel for dead branches.
+class _Removed:
+    def __init__(self, name): self._name = name
+    def __call__(self, *a, **kw): raise RuntimeError(f"{self._name} was removed in B200 build")
+    def __getattr__(self, attr):
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        raise RuntimeError(f"{self._name}.{attr} was removed in B200 build")
+sm80_utils = _Removed("ampere_helpers")
 from FA4_fp32.core.seqlen_info import SeqlenInfoQK
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 from quack.cute_dsl_utils import ParamsBase

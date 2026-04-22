@@ -34,14 +34,24 @@ from FA4_fp32.core.tile_scheduler import (
 
 from FA4_fp32.core import barrier
 from FA4_fp32.core.named_barrier import NamedBarrierBwdSm100
-from FA4_fp32.core.softmax import apply_score_mod_inner, apply_score_mod_bwd_inner
-from FA4_fp32.sparsity.block_sparsity import BlockSparseTensors
-from FA4_fp32.sparsity.block_sparse_utils import (
-    get_total_q_block_count_bwd,
-    get_block_sparse_iteration_info_bwd,
-    get_m_block_from_iter_bwd,
-    produce_block_sparse_q_loads_bwd_sm100,
-)
+# Features removed in B200 build; sentinels keep dead constexpr branches parseable.
+class _Removed:
+    def __init__(self, name): self._name = name
+    def __call__(self, *a, **kw): raise RuntimeError(f"{self._name} was removed in B200 build")
+    def __getattr__(self, attr):
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        raise RuntimeError(f"{self._name}.{attr} was removed in B200 build")
+
+from typing import Any as _Any
+apply_score_mod_inner = _Removed("apply_score_mod_inner")
+apply_score_mod_bwd_inner = _Removed("apply_score_mod_bwd_inner")
+# Only used as type hint in removed code paths.
+BlockSparseTensors = _Any
+get_total_q_block_count_bwd = _Removed("get_total_q_block_count_bwd")
+get_block_sparse_iteration_info_bwd = _Removed("get_block_sparse_iteration_info_bwd")
+get_m_block_from_iter_bwd = _Removed("get_m_block_from_iter_bwd")
+produce_block_sparse_q_loads_bwd_sm100 = _Removed("produce_block_sparse_q_loads_bwd_sm100")
 
 
 class FlashAttentionBackwardSm100:
@@ -51,8 +61,6 @@ class FlashAttentionBackwardSm100:
         self,
         head_dim: int,
         head_dim_v: Optional[int] = None,
-        is_causal: bool = False,
-        is_local: bool = False,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
         tile_m: int = 128,
         tile_n: int = 128,
@@ -60,13 +68,16 @@ class FlashAttentionBackwardSm100:
         deterministic: bool = False,
         cluster_size: int = 1,
         use_2cta_instrs: bool = False,
-        score_mod: cutlass.Constexpr | None = None,
-        score_mod_bwd: cutlass.Constexpr | None = None,
-        mask_mod: cutlass.Constexpr | None = None,
-        has_aux_tensors: cutlass.Constexpr = False,
         subtile_factor: cutlass.Constexpr[int] = 1,
         q_dtype: Optional[type] = None,
     ):
+        # Features removed in B200 build: fixed to False/None below.
+        is_causal = False
+        is_local = False
+        score_mod = None
+        score_mod_bwd = None
+        mask_mod = None
+        has_aux_tensors = False
         # Cache q_dtype so __init__-time layout decisions (TMEM offsets in
         # particular) can branch on it. __call__ will re-confirm from the
         # actual tensor element_type.
