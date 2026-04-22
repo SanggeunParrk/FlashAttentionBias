@@ -385,9 +385,7 @@ def _flash_attn_fwd(
     assert seqused_k is None or seqused_k.shape == (batch_size,), (
         "seqused_k must have shape (batch_size,)"
     )
-    assert q.dtype in [torch.float16, torch.bfloat16, torch.float32], (
-        "inputs must be float16, bfloat16, or float32 (TF32 MMA)"
-    )
+    assert q.dtype in [torch.float16, torch.bfloat16], "inputs must be float16 or bfloat16"
     assert q.dtype == k.dtype == v.dtype, "inputs must have the same dtype"
     for t in [cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k]:
         if t is not None:
@@ -504,12 +502,6 @@ def _flash_attn_fwd(
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
         q_stage = 1
-    # fp32 I/O uses 2x smem vs fp16/bf16 — force q_stage=1 and smaller tile.
-    if q.dtype == torch.float32 and arch // 10 == 10:
-        q_stage = 1
-        if tile_mn is None:
-            tile_m, tile_n = 128, 64
-            fwd_cfg = FwdConfig(tile_m, tile_n, fwd_cfg.mma_pv_is_rs, fwd_cfg.intra_wg_overlap)
 
     m_block_size_effective = q_stage * tile_m
     seqlen_k_loaded = max_seqlen_k if not local else max(0, min(max_seqlen_k, (window_size_right or max_seqlen_k) + (window_size_left or max_seqlen_k) + 1 + tile_m))
@@ -1101,12 +1093,6 @@ def _flash_attn_bwd(
         )
         cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
         use_2cta_instrs = cluster_size==2
-        # fp32 I/O: 2x smem/TMEM → use smaller tile, disable 2-CTA.
-        if q.dtype == torch.float32:
-            m_block_size = 64
-            n_block_size = 128
-            cluster_size = 1
-            use_2cta_instrs = False
 
     q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k = [
         maybe_contiguous(t)
@@ -1163,9 +1149,7 @@ def _flash_attn_bwd(
             "lse must have shape (batch_size, num_head, seqlen_q)"
         )
 
-    assert q.dtype in [torch.float16, torch.bfloat16, torch.float32], (
-        "inputs must be float16, bfloat16, or float32 (TF32 MMA)"
-    )
+    assert q.dtype in [torch.float16, torch.bfloat16], "inputs must be float16 or bfloat16"
     assert q.dtype == k.dtype == v.dtype == out.dtype == dout.dtype, (
         "inputs must have the same dtype"
     )
@@ -1507,7 +1491,6 @@ def _flash_attn_bwd(
                 mask_mod=mask_mod,
                 has_aux_tensors=aux_tensors is not None,
                 subtile_factor=subtile_factor,
-                q_dtype=dtype,
             )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).

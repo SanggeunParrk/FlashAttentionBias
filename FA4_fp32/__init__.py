@@ -9,7 +9,7 @@ except PackageNotFoundError:
 
 import cutlass.cute as cute
 
-from FA4_fp32.interface import (
+from .interface import (
     flash_attn_func,
     flash_attn_varlen_func,
 )
@@ -20,14 +20,7 @@ from FA4_fp32.infra.cute_dsl_utils import cute_compile_patched
 cute.compile = cute_compile_patched
 
 
-from FA4_fp32.reference import attention_fp32
-from FA4_fp32.verify import compare, Shape, DEFAULT_SHAPES
-
 __all__ = [
     "flash_attn_func",
     "flash_attn_varlen_func",
-    "attention_fp32",
-    "compare",
-    "Shape",
-    "DEFAULT_SHAPES",
 ]

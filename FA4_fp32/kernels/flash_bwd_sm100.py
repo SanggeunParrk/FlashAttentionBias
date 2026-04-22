@@ -65,12 +65,7 @@ class FlashAttentionBackwardSm100:
         mask_mod: cutlass.Constexpr | None = None,
         has_aux_tensors: cutlass.Constexpr = False,
         subtile_factor: cutlass.Constexpr[int] = 1,
-        q_dtype: Optional[type] = None,
     ):
-        # Cache q_dtype so __init__-time layout decisions (TMEM offsets in
-        # particular) can branch on it. __call__ will re-confirm from the
-        # actual tensor element_type.
-        self._init_q_dtype = q_dtype
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
         self.tile_hdim = int(math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of)
@@ -195,7 +190,7 @@ class FlashAttentionBackwardSm100:
             self.tmem_dQ_offset = 512 - self.tile_hdim // 2
         else:
             self.tmem_S_offset = 0
-            self.tmem_P_offset = 0  # overlap with S (fp16/bf16 packing trick)
+            self.tmem_P_offset = 0  # overlap with S
             self.tmem_dV_offset = self.tmem_S_offset + self.tile_n
             self.tmem_dP_offset = self.tmem_dV_offset + self.tile_hdimv
             self.tmem_dQ_offset = (
@@ -256,14 +251,7 @@ class FlashAttentionBackwardSm100:
                 self.sdQaccum_stage = 2 if self.deterministic else 4
                 self.dQ_reduce_ncol_t2r = 32
             else:
-                # fp32 I/O path: TMEM dQ accumulator is tiled with 16-col
-                # granularity because TF32 MMA produces half the columns-
-                # per-instr of fp16/bf16 MMA. For fp16/bf16 keep the original
-                # 32-col granularity.
-                if self.q_dtype is Float32:
-                    self.dQ_reduce_ncol = 16
-                else:
-                    self.dQ_reduce_ncol = 32
+                self.dQ_reduce_ncol = 32
                 self.sdQaccum_stage = 64 // self.dQ_reduce_ncol
                 self.dQ_reduce_ncol_t2r = self.dQ_reduce_ncol
         assert (self.tile_hdim // self.cta_group_size) % self.dQ_reduce_ncol == 0
@@ -3130,7 +3118,6 @@ class FlashAttentionBackwardSm100:
                         )
                         tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
                         tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
-                    # fp32 bwd P-storage TODO: see top-of-__call__ gate.
                     utils.cvt_f16(tSrS_cur, tSrP_r2t[None, stage, 0, 0])
                     if const_expr(stage == 0):
                         cute.arch.fence_view_async_tmem_load()
@@ -3446,60 +3433,17 @@ class FlashAttentionBackwardSm100:
         is_tma_warp = warp_idx == 0
         cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         # TMEM -> RMEM
-        # fp16/bf16: flat Ld32x32bOp covers the full reduce-ncol width at once.
-        # fp32: TF32 MMA splits the accumulator into (inner 16, outer stacks)
-        # along the N (head_dim) axis, so a flat 32-col atom does not match.
-        # We pick the atom via get_tmem_load_op for a 16-col sub-tile (same
-        # pattern the forward epilogue uses) and loop over the chunks.
-        fp32_dQ = self.q_dtype is Float32
-        if const_expr(fp32_dQ):
-            # Chunked view of the dQ accumulator: inner (tile_m, dQ_reduce_ncol),
-            # outer = (1, num_chunks) where num_chunks * dQ_reduce_ncol == tile_hdim.
-            tdQtdQ_chunks = cute.logical_divide(
-                tdQtdQ,
-                cute.make_layout((self.tile_m, self.dQ_reduce_ncol)),
-            )
-            tmem_load_atom = sm100_utils_basic.get_tmem_load_op(
-                self.mma_tiler_dsk,
-                LayoutEnum.ROW_MAJOR,
-                Float32,  # dst dtype
-                Float32,  # acc dtype
-                (self.tile_m, self.dQ_reduce_ncol),
-                use_2cta_instrs=self.use_2cta_instrs,
-            )
-            tiled_t2r = tcgen05.make_tmem_copy(
-                tmem_load_atom, tdQtdQ_chunks[(None, None), 0]
-            )
-            thr_copy_t2r = tiled_t2r.get_slice(tidx)
-            # Partition the full chunked tensor; outer mode indexes the chunks.
-            tdQtdQ_t2r = thr_copy_t2r.partition_S(
-                tdQtdQ_chunks[(None, None), None]
-            )
-        else:
-            tmem_load_atom = cute.make_copy_atom(
-                tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)), Float32
-            )
-            thr_copy_t2r = tcgen05.make_tmem_copy(tmem_load_atom, tdQtdQ).get_slice(tidx)
-            tdQtdQ_t2r = thr_copy_t2r.partition_S(tdQtdQ)
+        tmem_load_atom = cute.make_copy_atom(
+            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)), Float32
+        )
+        thr_copy_t2r = tcgen05.make_tmem_copy(tmem_load_atom, tdQtdQ).get_slice(tidx)
+        tdQtdQ_t2r = thr_copy_t2r.partition_S(tdQtdQ)
         tdQcdQ = thr_mma_dQ.partition_C(cute.make_identity_tensor(self.mma_tiler_dsk[:2]))
-        if const_expr(fp32_dQ):
-            # Use the same chunked partition so partition_D matches partition_S.
-            tdQcdQ_chunks = cute.logical_divide(
-                tdQcdQ, cute.make_layout((self.tile_m, self.dQ_reduce_ncol))
-            )
-            tdQrdQ_t2r_shape = thr_copy_t2r.partition_D(
-                tdQcdQ_chunks[(None, None), None]
-            ).shape
-        else:
-            tdQrdQ_t2r_shape = thr_copy_t2r.partition_D(tdQcdQ).shape
+        tdQrdQ_t2r_shape = thr_copy_t2r.partition_D(tdQcdQ).shape
         # For 2-CTA: reduce_stage = dQaccum_reduce_stage_t2r / cta_group_size
         expected_reduce_stages_t2r = self.dQaccum_reduce_stage_t2r // self.cta_group_size
-        # fp32 path: tdQrdQ_t2r_shape is (per_thread, 1, 1, num_chunks).
-        # fp16/bf16 path: (per_thread, num_stages).
-        _mode_check = 3 if fp32_dQ else 1
-        assert cute.size(tdQrdQ_t2r_shape, mode=[_mode_check]) == expected_reduce_stages_t2r, (
-            f"dQaccum t2r reduce stage mismatch: got shape {tdQrdQ_t2r_shape}, "
-            f"expected stages {expected_reduce_stages_t2r}"
+        assert cute.size(tdQrdQ_t2r_shape, mode=[1]) == expected_reduce_stages_t2r, (
+            "dQaccum t2r reduce stage mismatch"
         )
         expected_reduce_stages = self.dQaccum_reduce_stage // self.cta_group_size
         # 2-CTA: CTA 0 -> (M/2, D) (stage 0, 1) & CTA 1 -> (M/2, D) (stage 2, 3)
@@ -3590,17 +3534,7 @@ class FlashAttentionBackwardSm100:
                 pipeline_dQ.consumer_wait(dQ_consumer_state)
                 # TMEM -> RMEM
                 tdQrdQ_t2r = cute.make_fragment(tdQrdQ_t2r_shape, Float32)
-                if const_expr(fp32_dQ):
-                    # TF32 accumulator is chunked along N; copy each chunk.
-                    num_chunks = self.tile_hdim // self.dQ_reduce_ncol
-                    for chunk_idx in cutlass.range_constexpr(num_chunks):
-                        cute.copy(
-                            thr_copy_t2r,
-                            tdQtdQ_t2r[None, 0, 0, chunk_idx],
-                            tdQrdQ_t2r[None, 0, 0, chunk_idx],
-                        )
-                else:
-                    cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
+                cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
                 cute.arch.fence_view_async_tmem_load()
                 cute.arch.sync_warp()
                 with cute.arch.elect_one():

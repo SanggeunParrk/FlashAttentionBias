@@ -7,6 +7,9 @@ import numpy as np
 
 LOG = Path(sys.argv[1] if len(sys.argv) > 1 else "bench_fwdbwd.txt")
 OUT = Path(sys.argv[2] if len(sys.argv) > 2 else "bench_fwdbwd.png")
+# Optional: sys.argv[3]=device label, sys.argv[4]=peak TFLOPS (bf16/fp16)
+DEVICE = sys.argv[3] if len(sys.argv) > 3 else "B200"
+PEAK_TFLOPS = float(sys.argv[4]) if len(sys.argv) > 4 else 2250.0
 
 text = LOG.read_text()
 BACKENDS = ["Standard", "cuDNN", "FA4"]
@@ -76,21 +79,22 @@ for row, (metric_idx, ylabel, log) in enumerate([
         ax.set_xlabel("Sequence length")
         if row == 0:
             ax.set_title(title)
-            ax.axhline(2250, ls="--", color="k", lw=0.6, alpha=0.4)
+            ax.axhline(PEAK_TFLOPS, ls="--", color="k", lw=0.6, alpha=0.4)
         if log:
             ax.set_yscale("log")
         ax.grid(axis="y", alpha=0.3, which="both")
     row_axes[0].set_ylabel(ylabel)
 
-axes[0, 0].set_ylim(0, 2400)
-axes[0, -1].text(x[-1] + 0.5, 2260, "B200 fp16 peak ~2.25 PFLOPS",
+axes[0, 0].set_ylim(0, PEAK_TFLOPS * 1.07)
+axes[0, -1].text(x[-1] + 0.5, PEAK_TFLOPS * 1.005,
+                 f"{DEVICE} fp16 peak ~{PEAK_TFLOPS/1000:.2f} PFLOPS",
                  fontsize=7.5, ha="right")
 axes[0, 0].legend(loc="upper left")
 mcfg = re.search(r"hdim=(\d+),.*?nheads=(\d+)(?:,\s*nheads_kv=(\d+))?", text)
 causal = "causal" if "causal=True" in text else "non-causal"
 hdim, nh, nhkv = mcfg.group(1), mcfg.group(2), mcfg.group(3) or mcfg.group(2)
 gqa = f", {nh}Q/{nhkv}KV" if nh != nhkv else f", {nh} heads"
-fig.suptitle(f"FlashAttention on B200 — fp16, hdim={hdim}, {causal}{gqa}",
+fig.suptitle(f"FlashAttention on {DEVICE} — fp16, hdim={hdim}, {causal}{gqa}",
              y=1.00, fontsize=12)
 fig.tight_layout()
 fig.savefig(OUT, dpi=110, bbox_inches="tight")

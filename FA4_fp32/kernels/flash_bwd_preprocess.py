@@ -81,7 +81,7 @@ class FlashAttentionBackwardPreprocess:
         :return: True if the kernel can be implemented, False otherwise
         :rtype: bool
         """
-        if dtype not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]:
+        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
             return False
         if head_dim % 8 != 0:
             return False
@@ -140,8 +140,8 @@ class FlashAttentionBackwardPreprocess:
         # Get the data type and check if it is fp16 or bf16
         if const_expr(not (mO.element_type == mdO.element_type)):
             raise TypeError("All tensors must have the same data type")
-        if const_expr(mO.element_type not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]):
-            raise TypeError("Only Float16/BFloat16/Float32 is supported")
+        if const_expr(mO.element_type not in [cutlass.Float16, cutlass.BFloat16]):
+            raise TypeError("Only Float16 or BFloat16 is supported")
         if const_expr(mPdPsum.element_type not in [Float32]):
             raise TypeError("PdPsum tensor must be Float32")
         if const_expr(mdQaccum is not None):

@@ -8,7 +8,7 @@ import cutlass.cute as cute
 from cutlass import Float32, Int32, Uint32, const_expr
 
 from quack import layout_utils
-from FA4_fp32.core import utils as utils
+import FA4_fp32.core.utils as utils
 from FA4_fp32.core.seqlen_info import SeqlenInfoQK
 
 MaskGenFn: TypeAlias = Callable[[int], Uint32]

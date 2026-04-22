@@ -36,7 +36,7 @@ from quack import copy_utils, layout_utils
 from FA4_fp32.core.paged_kv import PagedKVManager
 from FA4_fp32.infra.cute_dsl_utils import assume_tensor_aligned
 from FA4_fp32.core import utils
-from FA4_fp32.core import pipeline as pipeline_custom
+import FA4_fp32.core.pipeline as pipeline_custom
 import cutlass.pipeline as cutlass_pipeline
 from FA4_fp32.core.mask import AttentionMask
 from FA4_fp32.core.softmax import SoftmaxSm100, apply_score_mod_inner

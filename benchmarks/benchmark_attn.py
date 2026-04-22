@@ -191,6 +191,7 @@ def get_peak_flops(device_index: int = 0, dtype: torch.dtype = torch.bfloat16) -
         "H100 SXM": 989e12,
         "H100 NVL": 835e12,
         "H100 PCIe": 756e12,
+        "H100":  989e12,  # generic fallback (e.g. "H100 80GB HBM3" SXM5 variant)
         "H200":  989e12,
         "H20":   148e12,
         # Blackwell
