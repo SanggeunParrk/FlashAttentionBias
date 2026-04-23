@@ -60,14 +60,6 @@ _fa_clc_enabled: bool = os.environ.get("FA_CLC", "0") == "1"
 _fa_disable_2cta_enabled: bool = os.environ.get("FA_DISABLE_2CTA", "0") == "1"
 
 
-def _get_use_clc_scheduler_default() -> bool:
-    return _fa_clc_enabled
-
-
-def _get_disable_2cta_default() -> bool:
-    return _fa_disable_2cta_enabled
-
-
 def _compute_base_hash(func: Callable) -> str:
     """Compute hash from source code or bytecode and closure values."""
     try:
@@ -128,35 +120,9 @@ def hash_callable(
 LOG2_E = math.log2(math.e)
 
 
-def compute_softmax_scale_log2(softmax_scale, score_mod):
-    """Compute softmax_scale_log2 and adjusted softmax_scale based on whether score_mod is used.
-
-    When score_mod is None, fold the log2(e) factor into softmax_scale_log2 and set softmax_scale
-    to None. When score_mod is present, keep softmax_scale separate so it can be applied before
-    the score_mod, and set softmax_scale_log2 to just the change-of-base constant.
-
-    Returns (softmax_scale_log2, softmax_scale).
-    """
-    if const_expr(score_mod is None):
-        return softmax_scale * LOG2_E, None
-    else:
-        return LOG2_E, softmax_scale
-
-
-def compute_fastdiv_mods(mQ, mK, qhead_per_kvhead, pack_gqa, aux_tensors, mPageTable=None):
-    """Compute FastDivmodDivisor pairs for aux_tensors index computation.
-
-    Returns a (seqlen_q_divmod, seqlen_k_divmod) tuple, or None if aux_tensors is None.
-    """
-    if const_expr(aux_tensors is None):
-        return None
-    seqlen_q = cute.size(mQ.shape[0]) // (qhead_per_kvhead if const_expr(pack_gqa) else 1)
-    seqlen_k = (
-        cute.size(mK.shape[0])
-        if const_expr(mPageTable is None)
-        else mK.shape[0] * mPageTable.shape[1]
-    )
-    return (FastDivmodDivisor(seqlen_q), FastDivmodDivisor(seqlen_k))
+def compute_softmax_scale_log2(softmax_scale, score_mod=None):
+    """Fold log2(e) into softmax_scale (score_mod is unsupported in this build)."""
+    return softmax_scale * LOG2_E, None
 
 
 def convert_from_dlpack(x, leading_dim, alignment=16, divisibility=1) -> cute.Tensor:
@@ -179,58 +145,6 @@ def convert_from_dlpack_leading_static(
         if i != leading_dim and (static_modes is None or i not in static_modes):
             x_ = x_.mark_compact_shape_dynamic(mode=i, stride_order=stride_order)
     return x_
-
-
-def make_tiled_copy_A(
-    copy_atom: cute.CopyAtom, tiled_mma: cute.TiledMma, swapAB: cutlass.Constexpr[bool] = False
-) -> cute.TiledCopy:
-    if const_expr(swapAB):
-        return cute.make_tiled_copy_B(copy_atom, tiled_mma)
-    else:
-        return cute.make_tiled_copy_A(copy_atom, tiled_mma)
-
-
-def make_tiled_copy_B(
-    copy_atom: cute.CopyAtom, tiled_mma: cute.TiledMma, swapAB: cutlass.Constexpr[bool] = False
-) -> cute.TiledCopy:
-    if const_expr(swapAB):
-        return cute.make_tiled_copy_A(copy_atom, tiled_mma)
-    else:
-        return cute.make_tiled_copy_B(copy_atom, tiled_mma)
-
-
-def mma_make_fragment_A(
-    smem: cute.Tensor, thr_mma: cute.core.ThrMma, swapAB: cutlass.Constexpr[bool] = False
-) -> cute.Tensor:
-    if const_expr(swapAB):
-        return mma_make_fragment_B(smem, thr_mma)
-    else:
-        return thr_mma.make_fragment_A(thr_mma.partition_A(smem))
-
-
-def mma_make_fragment_B(
-    smem: cute.Tensor, thr_mma: cute.core.ThrMma, swapAB: cutlass.Constexpr[bool] = False
-) -> cute.Tensor:
-    if const_expr(swapAB):
-        return mma_make_fragment_A(smem, thr_mma)
-    else:
-        return thr_mma.make_fragment_B(thr_mma.partition_B(smem))
-
-
-def get_smem_store_atom(
-    arch: cutlass.Constexpr[int], element_type: Type[cute.Numeric], transpose: bool = False
-) -> cute.CopyAtom:
-    if const_expr(arch < 90 or element_type.width != 16):
-        return cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(),
-            element_type,
-            num_bits_per_copy=2 * element_type.width,
-        )
-    else:
-        return cute.make_copy_atom(
-            cute.nvgpu.warp.StMatrix8x8x16bOp(transpose=transpose, num_matrices=4),
-            element_type,
-        )
 
 
 @cute.jit
@@ -433,12 +347,6 @@ def predicate_k(tAcA: cute.Tensor, limit: cutlass.Int32) -> cute.Tensor:
     return tApA
 
 
-def canonical_warp_group_idx(sync: bool = True) -> cutlass.Int32:
-    warp_group_idx = cute.arch.thread_idx()[0] // 128
-    if const_expr(sync):
-        warp_group_idx = cute.arch.make_warp_uniform(warp_group_idx)
-    return warp_group_idx
-
 
 # @dsl_user_op
 # def warp_vote_any_lt(a: float | Float32, b: float | Float32, *, loc=None, ip=None) -> cutlass.Boolean:
@@ -537,20 +445,6 @@ def shr_u32(val: cutlass.Uint32, shift: cutlass.Uint32, *, loc=None, ip=None) ->
         )
     )
 
-
-@cute.jit
-def warp_prefix_sum(val: cutlass.Int32, lane: Optional[cutlass.Int32] = None) -> cutlass.Int32:
-    if const_expr(lane is None):
-        lane = cute.arch.lane_idx()
-    # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, val = %d", cute.arch.thread_idx()[0] % 32, val)
-    for i in cutlass.range_constexpr(int(math.log2(cute.arch.WARP_SIZE))):
-        offset = 1 << i
-        # Very important that we set mask_and_clamp to 0
-        partial_sum = cute.arch.shuffle_sync_up(val, offset=offset, mask_and_clamp=0)
-        if lane >= offset:
-            val += partial_sum
-        # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, partial_sum = %d, val = %d", cute.arch.thread_idx()[0] % 32, partial_sum, val)
-    return val
 
 
 @dsl_user_op
@@ -761,29 +655,3 @@ def e2e_asm2(x: Float32, y: Float32, *, loc=None, ip=None) -> Tuple[Float32, Flo
     return out0, out1
 
 
-@dsl_user_op
-def domain_offset_aligned(
-    coord: cute.Coord, tensor: cute.Tensor, *, loc=None, ip=None
-) -> cute.Tensor:
-    assert isinstance(tensor.iterator, cute.Pointer)
-    # We assume that applying the offset does not change the pointer alignment
-    new_ptr = cute.make_ptr(
-        tensor.element_type,
-        elem_pointer(tensor, coord).toint(),
-        tensor.memspace,
-        assumed_align=tensor.iterator.alignment,
-    )
-    return cute.make_tensor(new_ptr, tensor.layout)
-
-
-@cute.jit
-def scalar_to_ssa(a: cute.Numeric, dtype) -> cute.TensorSSA:
-    """Convert a scalar to a cute TensorSSA of shape (1,) and given dtype"""
-    vec = cute.make_fragment(1, dtype)
-    vec[0] = a
-    return vec.load()
-
-
-def ssa_to_scalar(val):
-    """Could inline but nice for reflecting the above api"""
-    return val[0]
