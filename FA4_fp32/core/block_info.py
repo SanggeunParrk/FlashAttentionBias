@@ -6,7 +6,7 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, const_expr
 
-from FA4_fp32.core.seqlen_info import SeqlenInfoQK, SeqlenInfoQKNewK
+from FA4_fp32.core.seqlen_info import SeqlenInfoQK
 
 
 @dataclass(frozen=True)
@@ -69,37 +69,6 @@ class BlockInfo:
             m_idx_left = m_idx + self.window_size_left
             m_block_max = min(m_block_max, cute.ceil_div(m_idx_left, self.tile_m))
         return m_block_min, m_block_max
-
-    @cute.jit
-    def get_n_block_k_new_min_max(
-        self,
-        seqlen_info: SeqlenInfoQKNewK,
-        m_block: Int32,
-        split_idx: Int32 = 0,
-        num_splits: Int32 = 1,
-    ) -> Tuple[Int32, Int32]:
-        """Get the block range for new K tokens (append KV).
-
-        First computes the full n_block range via get_n_block_min_max, then maps
-        those blocks into the new-K index space by subtracting seqlen_k_og.
-        """
-        n_block_min, n_block_max = self.get_n_block_min_max(
-            seqlen_info,
-            m_block,
-            split_idx,
-            num_splits,
-        )
-        idx_k_new_min = cutlass.max(n_block_min * self.tile_n - seqlen_info.seqlen_k_og, 0)
-        idx_k_new_max = cutlass.min(
-            n_block_max * self.tile_n - seqlen_info.seqlen_k_og, seqlen_info.seqlen_k_new
-        )
-        n_block_new_min = idx_k_new_min // self.tile_n
-        n_block_new_max = (
-            cute.ceil_div(idx_k_new_max, self.tile_n)
-            if idx_k_new_max > idx_k_new_min
-            else n_block_new_min
-        )
-        return n_block_new_min, n_block_new_max
 
     @cute.jit
     def get_n_block_min_causal_local_mask(
