@@ -53,14 +53,13 @@ class FlashAttentionBackwardPreprocess:
         :param num_threads: number of threads
         :type num_threads: int
         """
-        self.use_pdl = BaseDSL._get_dsl().get_arch_enum() >= Arch.sm_90a
         self.dtype = dtype
         self.tile_m = tile_m
         # padding head_dim to a multiple of 32 as k_block_size
         hdim_multiple_of = 32
         self.head_dim_padded = int(math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of)
-        self.head_dim_v_padded = int(math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of)
-        self.check_hdim_v_oob = head_dim_v != self.head_dim_v_padded
+        # Q/K/V same shape: head_dim_v == head_dim.
+        self.head_dim_v_padded = self.head_dim_padded
         self.num_threads = num_threads
 
     @staticmethod
@@ -134,25 +133,9 @@ class FlashAttentionBackwardPreprocess:
         # only passes mO, mdO, mPdPsum, mLSE, mLSElog2, mdQaccum, mdLSE, stream.
         stream: cuda.CUstream = None,
     ):
-        # Get the data type and check if it is fp16 or bf16
-        if const_expr(not (mO.element_type == mdO.element_type)):
-            raise TypeError("All tensors must have the same data type")
-        if const_expr(mO.element_type not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]):
-            raise TypeError("Only Float16/BFloat16/Float32 is supported")
-        if const_expr(mPdPsum.element_type not in [Float32]):
-            raise TypeError("PdPsum tensor must be Float32")
-        if const_expr(mdQaccum is not None):
-            if const_expr(mdQaccum.element_type not in [Float32]):
-                raise TypeError("dQaccum tensor must be Float32")
+        # Q/K/V/O same dtype, fp32 accumulators by build assumption.
         if const_expr(mLSE is not None):
             assert mLSElog2 is not None, "If mLSE is provided, mLSElog2 must also be provided"
-            if const_expr(mLSE.element_type not in [Float32]):
-                raise TypeError("LSE tensor must be Float32")
-            if const_expr(mLSElog2.element_type not in [Float32]):
-                raise TypeError("LSElog2 tensor must be Float32")
-        if const_expr(mdLSE is not None):
-            if const_expr(mdLSE.element_type not in [Float32]):
-                raise TypeError("dLSE tensor must be Float32")
 
         self._setup_attributes()
 
@@ -196,7 +179,7 @@ class FlashAttentionBackwardPreprocess:
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
             stream=stream,
-            use_pdl=self.use_pdl,
+            use_pdl=True,  # SM100 always supports PDL
         )
 
     @cute.kernel
@@ -251,17 +234,11 @@ class FlashAttentionBackwardPreprocess:
             cO = cute.make_identity_tensor(blk_shape)
             tOcO = gmem_thr_copy_O.partition_S(cO)
             t0OcO = gmem_thr_copy_O.get_slice(0).partition_S(cO)
-            tOpO = None
-            if const_expr(self.check_hdim_v_oob):
-                tOpO = copy_utils.predicate_k(tOcO, limit=headdim_v)
-            # Each copy will use the same predicate
-            copy = partial(copy_utils.copy, pred=tOpO)
+            # head_dim ∈ {32, 64} → head_dim_v_padded == head_dim_v, no OOB predication.
+            copy = copy_utils.copy
 
             tOrO = cute.make_rmem_tensor_like(tOgO)
             tOrdO = cute.make_rmem_tensor_like(tOgdO)
-            if const_expr(self.check_hdim_v_oob):
-                tOrO.fill(0.0)
-                tOrdO.fill(0.0)
             assert tOgO.shape == tOgdO.shape
             for m in cutlass.range(cute.size(tOrO.shape[1]), unroll_full=True):
                 # Instead of using tOcO, we using t0OcO and subtract the offset from the limit.
@@ -270,9 +247,8 @@ class FlashAttentionBackwardPreprocess:
                     copy(tOgO[None, m, None], tOrO[None, m, None])
                     copy(tOgdO[None, m, None], tOrdO[None, m, None])
             # O and dO loads are done; signal that the next kernel can start.
-            # Correctness is ensured by griddepcontrol_wait() in bwd_sm90 before it reads our outputs.
-            if const_expr(self.use_pdl):
-                cute.arch.griddepcontrol_launch_dependents()
+            # Correctness is ensured by griddepcontrol_wait() before reading our outputs.
+            cute.arch.griddepcontrol_launch_dependents()
             # Sum across the "k" dimension
             pdpsum = (tOrO.load().to(Float32) * tOrdO.load().to(Float32)).reduce(
                 cute.ReductionOp.ADD, init_val=0.0, reduction_profile=(0, None, 1)

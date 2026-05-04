@@ -81,7 +81,7 @@ class FlashAttentionForwardSm100:
         assert self.split_P_arrive % 32 == 0
         assert self.split_P_arrive < self.n_block_size
         self.arch = BaseDSL._get_dsl().get_arch_enum()
-        assert self.arch >= Arch.sm_100 and self.arch <= Arch.sm_110f, "Only SM 10.x and 11.x are supported"
+        assert self.arch >= Arch.sm_100 and self.arch <= Arch.sm_100f, "Only SM 10.0 (B100/B200) is supported"
 
         # Stripped build: 1-CTA only, cluster shape is (1, 1).
         self.cta_tiler = (self.q_stage * m_block_size, n_block_size, self.head_dim_padded)
@@ -91,10 +91,6 @@ class FlashAttentionForwardSm100:
         self.pv_acc_dtype = Float32
         self.cluster_shape_mn = (1, 1)
         self.is_persistent = is_persistent
-        is_sm103 = self.arch >= Arch.sm_103 and self.arch <= Arch.sm_103f
-        # head_dim is always in [8..128] in this stripped build, so ex2 emulation is enabled on non-sm103.
-        self.enable_ex2_emu = not is_sm103
-
         self.use_clc_scheduler = use_clc_scheduler
         self.sched_stages = 1
 
@@ -148,15 +144,10 @@ class FlashAttentionForwardSm100:
             self.tmem_s_offset[i] + self.tmem_s_to_p_offset for i in range(2)
         ]  # 0, 128
 
-        # Stripped build: no tuning overrides — use the defaults.
-        if self.head_dim_padded < 96:
-            self.num_regs_softmax = 200
-            self.num_regs_correction = 64
-            self.num_regs_other = 48
-        else:
-            self.num_regs_softmax = 192
-            self.num_regs_correction = 80
-            self.num_regs_other = 512 - self.num_regs_softmax * 2 - self.num_regs_correction
+        # head_dim is always in [32, 64] (head_dim_padded < 96).
+        self.num_regs_softmax = 200
+        self.num_regs_correction = 64
+        self.num_regs_other = 48
 
         self.buffer_align_bytes = 1024
 
@@ -210,16 +201,11 @@ class FlashAttentionForwardSm100:
         V_layout_transpose = [1, 0, 2, 3]
         mV = cute.make_tensor(mV.iterator, cute.select(mV.layout, mode=V_layout_transpose))
 
-        # check type consistency
-        if const_expr(self.q_dtype != self.k_dtype):
-            raise TypeError(f"Type mismatch: {self.q_dtype} != {self.k_dtype}")
-        if const_expr(self.q_dtype != self.v_dtype):
-            raise TypeError(f"Type mismatch: {self.q_dtype} != {self.v_dtype}")
+        # Q/K/V/O share dtype by build assumption.
         self._setup_attributes()
-        self.ex2_emu_freq = 0
+        # Polynomial exp2 emulation: faster than SM100 native SFU.
+        self.ex2_emu_freq = 16
         self.ex2_emu_start_frg = 1
-        if const_expr(self.enable_ex2_emu):
-            self.ex2_emu_freq = 16
 
         cta_group = tcgen05.CtaGroup.ONE
         q_major_mode = tcgen05.OperandMajorMode.K
@@ -934,7 +920,7 @@ class FlashAttentionForwardSm100:
                 self.tmem_o_offset[stage],
                 tOrP[None, None, None, stage],
                 sA=None,
-                split_arrive=self.split_P_arrive if self.split_P_arrive > 0 else None,
+                split_arrive=self.split_P_arrive,
                 cta_group=1,
             )
             for stage in range(self.q_stage)
@@ -989,7 +975,7 @@ class FlashAttentionForwardSm100:
                         tCrB=tOrVi,
                         sB=sV_cur,
                         zero_init=not O_should_accumulate,
-                        mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage) if self.split_P_arrive > 0 else None,
+                        mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage),
                         mbar_phase=P_full_O_rescaled_phase,
                     )
                     # 4. release V(i-1)
@@ -1028,7 +1014,7 @@ class FlashAttentionForwardSm100:
                     tCrB=tOrVi,
                     sB=sV_cur,
                     zero_init=not O_should_accumulate,
-                    mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage) if self.split_P_arrive > 0 else None,
+                    mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage),
                     mbar_phase=P_full_O_rescaled_phase,
                 )
                 # We do need O_full here since for the last tile, by the time the softmax warp
@@ -1219,22 +1205,18 @@ class FlashAttentionForwardSm100:
             ex2_emu_freq=self.ex2_emu_freq if const_expr(mask_fn is None) else 0,
             ex2_emu_start_frg=self.ex2_emu_start_frg,
         )
+        split_P_arrive_idx = cute.size(tStP_r2t.shape[2]) * self.split_P_arrive // self.n_block_size
         for i in cutlass.range_constexpr(cute.size(tStP_r2t.shape[2])):
             cute.copy(thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i])
-            if const_expr(self.split_P_arrive > 0):
-                split_P_arrive_idx = cute.size(tStP_r2t.shape[2]) * self.split_P_arrive // self.n_block_size
-                if const_expr(i + 1 == split_P_arrive_idx):
-                    # Notify mma warp that the 1st half of P is ready
-                    cute.arch.fence_view_async_tmem_store()
-                    pipeline_s_p_o.consumer_release_w_index(stage)
+            if const_expr(i + 1 == split_P_arrive_idx):
+                # Notify mma warp that the 1st half of P is ready
+                cute.arch.fence_view_async_tmem_store()
+                pipeline_s_p_o.consumer_release_w_index(stage)
         # Notify mma warp that the 2nd half of P is ready
         cute.arch.fence_view_async_tmem_store()
-        if const_expr(self.split_P_arrive > 0):
-            cute.arch.sync_warp()
-            with cute.arch.elect_one():
-                pipeline_p_lastsplit.producer_commit_w_index(stage)
-        else:
-            pipeline_s_p_o.consumer_release_w_index(stage)
+        cute.arch.sync_warp()
+        with cute.arch.elect_one():
+            pipeline_p_lastsplit.producer_commit_w_index(stage)
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
         softmax.update_row_sum(tSrS_t2r.load(), acc_scale, is_first)
         return mma_si_consumer_phase ^ 1, sm_stats_producer_phase ^ 1

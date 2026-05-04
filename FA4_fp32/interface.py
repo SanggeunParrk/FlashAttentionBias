@@ -38,7 +38,7 @@ from FA4_fp32.kernels.flash_bwd_sm100 import FlashAttentionBackwardSm100
 from FA4_fp32.kernels.flash_bwd_postprocess import FlashAttentionBackwardPostprocess
 
 
-_SM100_ARCHES = (100, 101, 103, 110)
+_SUPPORTED_ARCHES = (100,)  # B100/B200 only
 
 
 def _get_device_arch() -> int:
@@ -103,7 +103,7 @@ def _flash_attn_fwd(
         assert all(t.is_cuda for t in (q, k, v)), "inputs must be on CUDA device"
 
     arch = _get_device_arch()
-    assert arch in _SM100_ARCHES, f"Unsupported compute capability {arch}; only SM100/SM110 supported"
+    assert arch in _SUPPORTED_ARCHES, f"Unsupported compute capability {arch}; only SM100 (B100/B200) supported"
 
     alignment = 16 // q.element_size()
     _validate_head_dim(head_dim, alignment)
@@ -227,7 +227,7 @@ def _bwd_preprocess(out, dout, dpsum, lse, lse_log2, dq_accum, dlse,
 _bwd_preprocess.compile_cache = get_jit_cache("bwd_pre")
 
 
-def _compile_bwd_postprocess(dtype, hdim, block_size, num_threads, arch):
+def _compile_bwd_postprocess(dtype, hdim, block_size, num_threads):
     mQ, mK, mV, mO, mdO, mdQ, mdK, mdV, mLSE, mLSElog2, mPdPsum, mdQaccum = _make_fake_bwd_tensors(dtype)
     fa_bwd_post = FlashAttentionBackwardPostprocess(dtype, hdim, block_size, num_threads)
     return cute.compile(
@@ -237,8 +237,8 @@ def _compile_bwd_postprocess(dtype, hdim, block_size, num_threads, arch):
     )
 
 
-def _bwd_postprocess_convert(accum, output, scale, arch, dtype, hdim, block_size, num_threads):
-    compile_key = (dtype, hdim, block_size, num_threads, arch)
+def _bwd_postprocess_convert(accum, output, scale, dtype, hdim, block_size, num_threads):
+    compile_key = (dtype, hdim, block_size, num_threads)
     if compile_key not in _bwd_postprocess_convert.compile_cache:
         _bwd_postprocess_convert.compile_cache[compile_key] = _compile_bwd_postprocess(*compile_key)
     if not is_fake_mode():
@@ -266,7 +266,7 @@ def _flash_attn_bwd(
     dlse: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     arch = _get_device_arch()
-    assert arch in _SM100_ARCHES, f"Unsupported compute capability {arch}; only SM100/SM110 supported"
+    assert arch in _SUPPORTED_ARCHES, f"Unsupported compute capability {arch}; only SM100 (B100/B200) supported"
 
     num_head, head_dim = q.shape[-2:]
 
@@ -375,7 +375,7 @@ def _flash_attn_bwd(
     # Postprocess: convert dq_accum (float32) → dq (orig dtype) with softmax_scale.
     _bwd_postprocess_convert(
         dq_accum, dq, softmax_scale,
-        arch, dtype, head_dim, m_block_size, 128,
+        dtype, head_dim, m_block_size, 128,
     )
     return dq, dk, dv
 
