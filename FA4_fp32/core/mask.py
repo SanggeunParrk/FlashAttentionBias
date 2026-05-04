@@ -58,18 +58,11 @@ def mask_r2p_lambda(
 
 @dataclass(frozen=True)
 class AttentionMask:
-    """Applies right-K-edge seqlen masking.
-
-    `window_size_left`, `window_size_right`, `qhead_per_kvhead_packgqa`, and
-    `swap_AB` are kept as fields so existing `partial(AttentionMask, ...)` call
-    sites don't break, but they are all constants in this build.
-    """
+    """Applies right-K-edge seqlen masking. `swap_AB` is kept for the
+    backward kernel which swaps the role of A and B operands."""
     tile_m: cutlass.Constexpr[int]
     tile_n: cutlass.Constexpr[int]
     seqlen_info: SeqlenInfoQK
-    window_size_left: cutlass.Constexpr = None
-    window_size_right: cutlass.Constexpr = None
-    qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     swap_AB: cutlass.Constexpr[bool] = False
 
     @property
@@ -84,21 +77,11 @@ class AttentionMask:
     def apply_mask_sm100(
         self,
         acc_S: cute.Tensor,
-        m_block: Int32,
+        m_block: Int32,  # noqa: ARG002 — kept for API symmetry; unused without causal/local
         n_block: Int32,
         thr_mma: cute.TiledMma,
         thr_tmem_load: cute.TiledCopy,
         mask_seqlen: cutlass.Constexpr[bool],
-        # Deprecated constexpr kwargs kept for caller-signature compat.
-        mask_causal: cutlass.Constexpr[bool] = False,
-        mask_local: cutlass.Constexpr[bool] = False,
-        mask_mod=None,
-        batch_idx: Int32 = None,
-        head_idx: Int32 = None,
-        aux_tensors=None,
-        fastdiv_mods=(None, None),
-        head_divmod=None,
-        check_q_boundary: bool = False,
     ) -> None:
         """Forward pass: mask S = Q @ K.T so columns >= seqlen_k are -inf."""
         if const_expr(not mask_seqlen):
@@ -121,20 +104,10 @@ class AttentionMask:
         self,
         acc_S: cute.Tensor,
         tScS_t2r: cute.Tensor,
-        t0ScS_t2r: cute.Tensor,
-        m_block: cutlass.Int32,
+        t0ScS_t2r: cute.Tensor,  # noqa: ARG002 — kept for API symmetry
+        m_block: cutlass.Int32,  # noqa: ARG002
         n_block: cutlass.Int32,
         mask_seqlen: cutlass.Constexpr,
-        # Deprecated constexpr kwargs kept for caller-signature compat.
-        mask_causal: cutlass.Constexpr = False,
-        mask_local: cutlass.Constexpr = False,
-        mask_mod=None,
-        batch_idx: Int32 = None,
-        head_idx: Int32 = None,
-        aux_tensors=None,
-        fastdiv_mods=(None, None),
-        is_full_block: bool = False,
-        check_m_boundary: bool = True,
     ) -> None:
         """Backward pass: S = K @ Q.T where cols correspond to Q and rows to K.
 

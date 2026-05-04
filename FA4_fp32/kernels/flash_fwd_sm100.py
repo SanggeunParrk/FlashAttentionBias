@@ -200,7 +200,6 @@ class FlashAttentionForwardSm100:
         ]
         O_layout_transpose = [1, 3, 2, 0]
         LSE_layout_transpose = [2, 1, 0]
-        num_splits = Int32(1)
         mO = cute.make_tensor(mO.iterator, cute.select(mO.layout, mode=O_layout_transpose))
         mLSE = (
             cute.make_tensor(mLSE.iterator, cute.select(mLSE.layout, mode=LSE_layout_transpose))
@@ -321,24 +320,13 @@ class FlashAttentionForwardSm100:
         TileScheduler = self.TileScheduler
         _num_block_divisor = self.cta_tiler[0]
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),
-            cute.size(mQ.shape[2]),
-            cute.size(mQ.shape[3]),
-            num_splits,
-            cute.size(mK.shape[0]),
-            mQ.shape[1],
-            mV.shape[0],  # Note that this is different from Sm90 since we transpose mV in Sm100
-            total_q=cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
-            tile_shape_mn=self.cta_tiler[:2],
-            mCuSeqlensQ=None,
-            mSeqUsedQ=None,
-            qhead_per_kvhead_packgqa=1,
+            num_block=cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),
+            num_head=cute.size(mQ.shape[2]),
+            num_batch=cute.size(mQ.shape[3]),
+            seqlen_k=cute.size(mK.shape[0]),
+            headdim=mQ.shape[1],
+            headdim_v=mV.shape[0],  # mV is already transposed on SM100
             element_size=self.k_dtype.width // 8,
-            is_persistent=self.is_persistent,
-            lpt=False,
-            is_split_kv=False,
-            cluster_shape_mn=self.cluster_shape_mn,
-            use_cluster_idx=False,
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
@@ -390,7 +378,7 @@ class FlashAttentionForwardSm100:
 
         self.shared_storage = SharedStorage
 
-        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(softmax_scale, None)
+        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(softmax_scale)
 
         # Launch the kernel synchronously
         self.kernel(
@@ -413,7 +401,6 @@ class FlashAttentionForwardSm100:
             tiled_mma_qk,
             tiled_mma_pv,
             tile_sched_params,
-            num_splits,
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
@@ -445,7 +432,6 @@ class FlashAttentionForwardSm100:
         tiled_mma_qk: cute.TiledMma,
         tiled_mma_pv: cute.TiledMma,
         tile_sched_params: ParamsBase,
-        num_splits: Int32,
     ):
         """Warp-specialized SM100 MHA forward device kernel (load / MMA / softmax / correction / epilogue)."""
 
@@ -603,33 +589,13 @@ class FlashAttentionForwardSm100:
             cute.append(tOrP.layout, cute.make_layout((self.s_stage,), stride=(tP_stage_stride,)))
         )
 
-        block_info = BlockInfo(
-            self.cta_tiler[0],
-            self.cta_tiler[1],
-            False,  # is_causal
-            False,  # is_local
-            False,  # is_split_kv
-            None,   # window_size_left
-            None,   # window_size_right
-            qhead_per_kvhead_packgqa=1,
-        )
+        block_info = BlockInfo(self.cta_tiler[0], self.cta_tiler[1])
         SeqlenInfoCls = partial(
             SeqlenInfoQK.create,
             seqlen_q_static=mQ.shape[0],
             seqlen_k_static=mK.shape[0],
-            mCuSeqlensQ=None,
-            mCuSeqlensK=None,
-            mSeqUsedQ=None,
-            mSeqUsedK=None,
         )
-        AttentionMaskCls = partial(
-            AttentionMask,
-            self.m_block_size,
-            self.n_block_size,
-            window_size_left=None,
-            window_size_right=None,
-            qhead_per_kvhead_packgqa=1,
-        )
+        AttentionMaskCls = partial(AttentionMask, self.m_block_size, self.n_block_size)
         # Cluster wait before tensor memory alloc
         pipeline_init_wait(cluster_shape_mn=cta_layout_vmnk)
 
@@ -706,7 +672,6 @@ class FlashAttentionForwardSm100:
                 pipeline_q,
                 pipeline_kv,
                 block_info,
-                num_splits,
                 SeqlenInfoCls,
                 tile_scheduler=tile_scheduler,
             )
@@ -733,7 +698,6 @@ class FlashAttentionForwardSm100:
                 pipeline_p_lastsplit,
                 pipeline_o_acc,
                 block_info,
-                num_splits,
                 SeqlenInfoCls,
                 tile_scheduler=tile_scheduler,
             )
@@ -776,7 +740,6 @@ class FlashAttentionForwardSm100:
                 pipeline_sm_stats=pipeline_sm_stats,
                 sm_stats_barrier=sm_stats_barrier,
                 block_info=block_info,
-                num_splits=num_splits,
                 SeqlenInfoCls=SeqlenInfoCls,
                 AttentionMaskCls=AttentionMaskCls,
                 tile_scheduler=tile_scheduler,
@@ -806,7 +769,6 @@ class FlashAttentionForwardSm100:
                 pipeline_o_epi,
                 softmax_scale_log2,
                 block_info,
-                num_splits,
                 SeqlenInfoCls,
                 tile_scheduler=tile_scheduler,
             )
@@ -831,7 +793,6 @@ class FlashAttentionForwardSm100:
         pipeline_q: pipeline.PipelineAsync,
         pipeline_kv: pipeline.PipelineAsync,
         block_info: BlockInfo,
-        num_splits: Int32,
         SeqlenInfoCls: Callable,
         tile_scheduler: TileSchedulerProtocol,
     ):
@@ -841,7 +802,7 @@ class FlashAttentionForwardSm100:
         )
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
             mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[None, None, head_idx]
 
@@ -893,9 +854,7 @@ class FlashAttentionForwardSm100:
                 K_or_V="V",
             )
 
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen, m_block, split_idx, num_splits
-            )
+            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
             load_K(block=n_block_max - 1, producer_state=kv_producer_state)  # K0
             load_Q(block=0, stage=0)
             kv_producer_state.advance()
@@ -935,7 +894,6 @@ class FlashAttentionForwardSm100:
         pipeline_p_lastsplit: pipeline.PipelineAsync,
         pipeline_o_acc: pipeline.PipelineAsync,
         block_info: BlockInfo,
-        num_splits: Int32,
         SeqlenInfoCls: Callable,
         tile_scheduler=None,
     ):
@@ -990,10 +948,10 @@ class FlashAttentionForwardSm100:
 
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
 
-            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block, split_idx, num_splits)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
             block_iter_count = n_block_max - n_block_min
 
             for stage in cutlass.range_constexpr(self.q_stage):
@@ -1101,7 +1059,6 @@ class FlashAttentionForwardSm100:
         pipeline_sm_stats: pipeline.PipelineAsync,
         sm_stats_barrier: pipeline.NamedBarrier,
         block_info: BlockInfo,
-        num_splits: Int32,
         SeqlenInfoCls: Callable,
         AttentionMaskCls: Callable,
         tile_scheduler=None,
@@ -1139,9 +1096,9 @@ class FlashAttentionForwardSm100:
 
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block, split_idx, num_splits)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
 
             mask = AttentionMaskCls(seqlen)
             mask_fn = partial(
@@ -1149,14 +1106,6 @@ class FlashAttentionForwardSm100:
                 m_block=self.q_stage * m_block + stage,
                 thr_mma=thr_mma_qk,
                 thr_tmem_load=thr_tmem_load,
-                mask_causal=False,
-                mask_local=False,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                aux_tensors=None,
-                mask_mod=None,
-                fastdiv_mods=(None, None),
-                head_divmod=None,
             )
 
             softmax = SoftmaxSm100.create(
@@ -1305,7 +1254,6 @@ class FlashAttentionForwardSm100:
         pipeline_o_epi: pipeline.PipelineAsync,
         softmax_scale_log2: Float32,
         block_info: BlockInfo,
-        num_splits: Int32,
         SeqlenInfoCls: Callable,
         tile_scheduler=None,
     ):
@@ -1323,9 +1271,9 @@ class FlashAttentionForwardSm100:
 
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block, split_idx, num_splits)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
 
             # LSE rows default to -inf for masked-out rows
             stats = [(0.0, -Float32.inf if const_expr(mLSE is not None) else None, True)] * self.q_stage

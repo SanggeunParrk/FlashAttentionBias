@@ -521,23 +521,13 @@ class FlashAttentionBackwardSm100:
         TileScheduler = SingleTileScheduler
         self.spt = False
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),  # num_blocks
-            cute.size(mQ.shape[2]),  # num_heads = num_query_heads
-            cute.size(mK.shape[3]),  # num_batches
-            1,  # num_splits
-            cute.size(mQ.shape[0]),  # pass seqlen_q
-            mQ.shape[1],  # headdim
-            mV.shape[1],  # headdim_v
-            total_q=cute.size(mK.shape[0]) * cute.size(mK.shape[3]),
-            tile_shape_mn=self.cta_tiler[:2],  # (tile_n, tile_m)
-            cluster_shape_mn=self.cluster_shape_mnk[:2],
-            mCuSeqlensQ=None,
-            mSeqUsedQ=None,
-            qhead_per_kvhead_packgqa=1,
+            num_block=cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),
+            num_head=cute.size(mQ.shape[2]),
+            num_batch=cute.size(mK.shape[3]),
+            seqlen_k=cute.size(mQ.shape[0]),  # pass seqlen_q (S = K @ Q.T tiles over Q)
+            headdim=mQ.shape[1],
+            headdim_v=mV.shape[1],
             element_size=self.k_dtype.width // 8,
-            is_persistent=self.is_persistent,
-            lpt=False,
-            head_swizzle=False,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
@@ -928,22 +918,11 @@ class FlashAttentionBackwardSm100:
         tdQtdQ = thr_mma_dQ.make_fragment_C(dQacc_shape)
         tdQtdQ = cute.make_tensor(tmem_ptr + self.tmem_dQ_offset, tdQtdQ.layout)
 
-        block_info = BlockInfo(
-            self.tile_m,
-            self.tile_n,
-            False,  # is_causal
-            False,  # is_local
-            False,  # is_split_kv
-            None,  # window_size_left
-            None,  # window_size_right
-            qhead_per_kvhead_packgqa=1,
-        )
+        block_info = BlockInfo(self.tile_m, self.tile_n)
         SeqlenInfoCls = partial(
             SeqlenInfoQK.create,
             seqlen_q_static=mQ.shape[0],
             seqlen_k_static=mK.shape[0],
-            tile_m=self.tile_m,
-            tile_n=self.tile_n,
         )
         TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
 
@@ -952,8 +931,6 @@ class FlashAttentionBackwardSm100:
             self.tile_m,
             self.tile_n,
             swap_AB=True,
-            window_size_left=None,
-            window_size_right=None,
         )
         #  EMPTY
         # (14, 15): warp 14 is the old relay slot (2-CTA removed) kept idle.
@@ -1765,13 +1742,6 @@ class FlashAttentionBackwardSm100:
                 t0ScS_t2r=t0ScS_t2r,
                 n_block=n_block,
                 mask_seqlen=True,
-                mask_causal=False,
-                mask_local=False,
-                mask_mod=None,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                aux_tensors=aux_tensors,
-                fastdiv_mods=fastdiv_mods,
             )
 
             loop_count = m_block_max - m_block_min
@@ -1779,7 +1749,6 @@ class FlashAttentionBackwardSm100:
             # Mainloop
             for iter_idx in cutlass.range(loop_count, unroll=1):
                 m_block = m_block_min + iter_idx
-                is_full_block = False
                 # Prefetch 1 stage of LSE
                 pipeline_LSE.consumer_wait(consumer_state_LSE)
                 tSrLSE_s2r = cute.make_fragment(tScS_t2r[None, 0, 0, 0].shape, Float32)
@@ -1791,13 +1760,7 @@ class FlashAttentionBackwardSm100:
                 cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
 
                 #### APPLY MASK
-                check_m_boundary = (m_block + 1) * self.tile_m > seqlen.seqlen_q
-                mask_fn(
-                    tSrS_t2r,
-                    m_block=m_block,
-                    is_full_block=is_full_block,
-                    check_m_boundary=check_m_boundary,
-                )
+                mask_fn(tSrS_t2r, m_block=m_block)
                 num_stages = cute.size(tScS_t2r, mode=[1])
                 # ---------------------------------------------
                 #### P = exp(S - LSE)

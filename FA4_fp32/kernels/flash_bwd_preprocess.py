@@ -172,14 +172,9 @@ class FlashAttentionBackwardPreprocess:
             num_block=cute.ceil_div(mO.shape[1], self.tile_m),
             num_head=mO.shape[2],
             num_batch=mO.shape[0],
-            num_splits=1,
             seqlen_k=0,
             headdim=0,
             headdim_v=mO.shape[2],
-            total_q=mO.shape[0],
-            tile_shape_mn=(self.tile_m, 1),
-            mCuSeqlensQ=None,
-            mSeqUsedQ=None,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)

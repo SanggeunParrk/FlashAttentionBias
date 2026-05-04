@@ -120,8 +120,13 @@ def hash_callable(
 LOG2_E = math.log2(math.e)
 
 
-def compute_softmax_scale_log2(softmax_scale, score_mod=None):
-    """Fold log2(e) into softmax_scale (score_mod is unsupported in this build)."""
+def compute_softmax_scale_log2(softmax_scale):
+    """Fold log2(e) into softmax_scale.
+
+    Returns ``(softmax_scale * log2(e), None)``. The trailing ``None`` is the
+    legacy "kept-separate softmax_scale" slot used when score_mod was supported;
+    we keep it so existing 2-tuple unpacking call sites don't have to change.
+    """
     return softmax_scale * LOG2_E, None
 
 
