@@ -129,13 +129,22 @@ def _flash_attn_fwd(
 
     dtype = torch2cute_dtype_map[q.dtype]
 
-    # Fixed tile config. fp32 input uses 2x smem, so smaller tile_n and single Q stage.
+    # Fixed tile config. fp32 path is built only for head_dim <= 64 — that bound
+    # keeps sQ+sO <= 128 KiB even with q_stage=2 + tile_n=128, leaving kv_stage>=3.
     if q.dtype == torch.float32:
-        tile_m, tile_n = 128, 64
-        q_stage = 1
+        assert head_dim <= 64, "fp32 path is built for head_dim <= 64 only"
+        tile_m, tile_n = 128, 128
+        q_stage = 2 if seqlen_q > tile_m else 1
     else:
         tile_m, tile_n = 128, 128
         q_stage = 2 if seqlen_q > tile_m else 1
+    # Optional overrides for benchmarking.
+    _q_stage_env = os.environ.get("FA_Q_STAGE")
+    if _q_stage_env is not None and seqlen_q > tile_m:
+        q_stage = int(_q_stage_env)
+    _tile_n_env = os.environ.get("FA_TILE_N")
+    if _tile_n_env is not None:
+        tile_n = int(_tile_n_env)
 
     use_clc_scheduler = os.environ.get("FA_CLC", "0") == "1"
 
