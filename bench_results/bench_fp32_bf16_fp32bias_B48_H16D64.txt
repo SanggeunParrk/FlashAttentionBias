@@ -1,0 +1,10 @@
+# fp32/bf16 = FA4_fp32 fwd on shape (Btot,L,H,D).
+# fp32_bias = SMEM bias fwd on q/k/v/o (A,B,L,H,D), bias (1,B,L,H,L).
+# A=48 B=1 Btot=48 H=16 D=64 bias_tile_n=64 q_stage=2.
+# TFLOPS uses 4*Btot*H*L^2*D and does not count bias load/add as extra FLOPs.
+  A  B  Btot   H      L    D    fp32 ms    bf16 ms  fp32_bias ms    fp32 TF    bf16 TF    bias TF   bias/fp32   bias/bf16
+-----------------------------------------------------------------------------------------------------------------------------------
+ 48  1    48  16   1024   64      0.313      0.326        19.377      659.3      632.2       10.6      61.97x      59.42x
+ 48  1    48  16   2048   64      1.193      1.431        81.829      691.2      576.1       10.1      68.59x      57.17x
+ 48  1    48  16   4096   64      4.754      6.161       338.554      693.8      535.4        9.7      71.21x      54.95x
+ 48  1    48  16   8192   64     18.961     18.269      1359.777      695.8      722.2        9.7      71.71x      74.43x
