@@ -2,6 +2,7 @@
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_postprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
 import math
+import os
 from typing import Callable, Optional, Type
 
 import cuda.bindings.driver as cuda
@@ -101,7 +102,13 @@ class FlashAttentionBackwardPostprocess:
         )
         # SM100 only.
         num_s2r_copy_elems = 4
-        self.dQ_reduce_ncol = 32
+        # Must match flash_bwd_sm100.dQ_reduce_ncol: TF32 (fp32) MMA produces half
+        # the columns-per-instr of fp16/bf16, so dQaccum is tiled with 16-col stages
+        # (vs 32 for fp16/bf16). Mismatch here => sdQaccum size disagreement => smem OOB.
+        self.dQ_reduce_ncol = 16 if self.dtype is Float32 else 32
+        if int(os.environ.get("FA_BWD_SHAPE_DEBUG", "0")):
+            print(f"[postprocess] dtype={self.dtype} tile_m={self.tile_m} "
+                  f"tile_hdim={self.tile_hdim} dQ_reduce_ncol={self.dQ_reduce_ncol}")
         dQaccum_reduce_stage = self.tile_hdim // self.dQ_reduce_ncol
         assert self.num_threads == 128  # TODO: currently hard-coded
         self.s2r_tiled_copy_dQaccum = copy_utils.tiled_copy_1d(
@@ -281,7 +288,11 @@ class FlashAttentionBackwardPostprocess:
             # Step 3: Copy dQ from register to smem
             cute.arch.barrier()  # make sure all threads have finished loading dQaccum
             # SM100 only: plain universal 128-bit store atom.
-            thr_layout_r2s_dQ = cute.make_layout((self.num_threads, 1))
+            # Cap row-threads at tile_m so we don't OOB the (tile_m, tile_hdim) tile
+            # (e.g. fp32 has tile_m=64 < num_threads=128). Remainder distributes in col.
+            threads_per_row_dQ = math.gcd(self.num_threads, self.tile_m)
+            threads_per_col_dQ = self.num_threads // threads_per_row_dQ
+            thr_layout_r2s_dQ = cute.make_layout((threads_per_row_dQ, threads_per_col_dQ))
             val_layout_r2s_dQ = cute.make_layout((1, 128 // self.dtype.width))
             copy_atom_r2s_dQ = cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(),
