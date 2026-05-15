@@ -1,0 +1,15 @@
+# Decompose softmax-side bias overhead into SMEM-read vs fma.
+# Bias TMA + pipeline_bias consumer_wait/release are unchanged in all variants.
+# A=48 B=1 H=16 D=64 tile_n=64 q_stage=2
+#
+# Reference (from earlier runs, same shape):
+#   no-bias  kv_stage=2 (cap)    : see exp_kv_stage_isolate.txt 'capped'
+#   TMA-only (apply=noop)        : see exp_bias_load_only.txt
+#   real bias fp32 (apply=full)  : see exp_bias_hbm_isolate.txt 'fp32_bias'
+#
+     L  read_only ms   fma_only ms  read_only TF   fma_only TF
+--------------------------------------------------------------------------------
+  1024         1.225         0.514         168.3         400.9
+  2048         4.912         1.954         167.9         422.1
+  4096        19.117         8.261         172.5         399.3
+  8192        75.608        36.844         174.5         358.1

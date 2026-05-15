@@ -1,0 +1,14 @@
+# Fake kernel: bias TMA runs (with pipeline_bias mbarriers); softmax skips apply_bias_smem.
+# Output is wrong; timing only.
+# A=48 B=1 H=16 D=64 tile_n=64 q_stage=2
+#
+# Reference points (from earlier experiments, same shape):
+#   no-bias  kv_stage=2 (cap): see exp_kv_stage_isolate.txt 'capped'
+#   fp32-bias kv_stage=2     : see exp_bias_hbm_isolate.txt  'fp32_bias'
+#
+     L  load_only ms  load_only TF
+--------------------------------------------------
+  1024         0.512         402.8
+  2048         1.938         425.4
+  4096         8.138         405.3
+  8192        37.488         352.0

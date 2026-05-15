@@ -1,0 +1,9 @@
+# Bias-free fp32 FA4 fwd, A=48 B=1 H=16 D=64 tile_n=64 q_stage=2.
+# natural kv_stage = (224KB - smem_q_o) / smem_kv = (224-128)/16 = 6.
+# capped  kv_stage = 2 (matches what the SMEM-staged bias kernel runs at).
+     L  natural ms   capped ms  natural TF   capped TF  capped/natural
+--------------------------------------------------------------------------------
+  1024       0.363       0.524       568.2       393.2          1.445x
+  2048       1.397       1.988       590.3       414.9          1.423x
+  4096       5.576       7.127       591.6       462.9          1.278x
+  8192      22.930      27.121       575.4       486.5          1.183x
