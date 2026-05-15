@@ -5,6 +5,7 @@
 import math
 from typing import Tuple, Callable, Optional, Literal
 from functools import partial
+from dataclasses import dataclass
 
 import cuda.bindings.driver as cuda
 
@@ -35,10 +36,118 @@ from FA4_fp32.arch import blackwell_helpers as sm100_utils
 from FA4_fp32.core.named_barrier import NamedBarrierFwdSm100
 from FA4_fp32.core.tile_scheduler import (
     ClcState,
-    TileSchedulerArguments,
+    SchedulingMode,
     TileSchedulerProtocol,
+    WorkTileInfo,
 )
 from FA4_fp32.kernels.flash_fwd_sm100 import FlashAttentionForwardSm100
+
+
+
+@dataclass
+class BiasTileSchedulerArguments(ParamsBase):
+    num_block: Int32
+    num_head: Int32
+    num_batch_a: Int32
+    num_batch_b: Int32
+
+
+class BiasAfastPersistentTileScheduler:
+    """Persistent scheduler that keeps A adjacent for the same (B, H, M tile)."""
+
+    @dataclass
+    class Params(ParamsBase):
+        num_a: Int32
+        num_a_divmod: FastDivmodDivisor
+        num_block_divmod: FastDivmodDivisor
+        num_head_divmod: FastDivmodDivisor
+        total_blocks: Int32
+
+        @staticmethod
+        def create(
+            args: BiasTileSchedulerArguments, *, loc=None, ip=None
+        ) -> "BiasAfastPersistentTileScheduler.Params":
+            total_blocks = (
+                args.num_block * args.num_head * args.num_batch_a * args.num_batch_b
+            )
+            return BiasAfastPersistentTileScheduler.Params(
+                args.num_batch_a,
+                FastDivmodDivisor(args.num_batch_a),
+                FastDivmodDivisor(args.num_block),
+                FastDivmodDivisor(args.num_head),
+                total_blocks,
+            )
+
+    def __init__(self, params: Params, tile_idx: Int32, *, loc=None, ip=None):
+        self.params = params
+        self._tile_idx = tile_idx
+        self._loc = loc
+        self._ip = ip
+
+    @staticmethod
+    def to_underlying_arguments(
+        args: BiasTileSchedulerArguments,
+        *,
+        scheduling_mode: SchedulingMode = SchedulingMode.STATIC,
+        loc=None,
+        ip=None,
+    ) -> Params:
+        assert scheduling_mode == SchedulingMode.STATIC, (
+            f"BiasAfastPersistentTileScheduler only supports STATIC, got {scheduling_mode!r}"
+        )
+        return BiasAfastPersistentTileScheduler.Params.create(args, loc=loc, ip=ip)
+
+    @staticmethod
+    def create(
+        params: Params, clc: ClcState | None = None, *, loc=None, ip=None
+    ) -> "BiasAfastPersistentTileScheduler":
+        return BiasAfastPersistentTileScheduler(
+            params, cute.arch.block_idx()[0], loc=loc, ip=ip
+        )
+
+    @staticmethod
+    def get_grid_shape(params: Params, *, loc=None, ip=None) -> Tuple[Int32, Int32, Int32]:
+        sm_count = cutlass.utils.HardwareInfo().get_device_multiprocessor_count()
+        grid_x = cutlass.min(sm_count, params.total_blocks)
+        return (grid_x, Int32(1), Int32(1))
+
+    def get_current_work(self, *, loc=None, ip=None) -> WorkTileInfo:
+        tile_wo_a, a_idx = divmod(self._tile_idx, self.params.num_a_divmod)
+        hb_idx, block_idx = divmod(tile_wo_a, self.params.num_block_divmod)
+        batch_b_idx, head_idx = divmod(hb_idx, self.params.num_head_divmod)
+        ab_idx = batch_b_idx * self.params.num_a + a_idx
+        is_valid = self._tile_idx < self.params.total_blocks
+        return WorkTileInfo(
+            (Int32(block_idx), Int32(head_idx), Int32(ab_idx), Int32(0)), is_valid
+        )
+
+    def initial_work_tile_info(self, *, loc=None, ip=None):
+        return self.get_current_work(loc=loc, ip=ip)
+
+    def prefetch_next_work(self, *, loc=None, ip=None):
+        pass
+
+    def advance_to_next_work(self, *, loc=None, ip=None):
+        self._tile_idx += cute.arch.grid_dim()[0]
+        return self.get_current_work()
+
+    def producer_tail(self, *, loc=None, ip=None):
+        pass
+
+    def __extract_mlir_values__(self):
+        values, self._values_pos = [], []
+        for obj in [self.params, self._tile_idx]:
+            obj_values = cutlass.extract_mlir_values(obj)
+            values += obj_values
+            self._values_pos.append(len(obj_values))
+        return values
+
+    def __new_from_mlir_values__(self, values):
+        obj_list = []
+        for obj, n_items in zip([self.params, self._tile_idx], self._values_pos):
+            obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
+            values = values[n_items:]
+        return BiasAfastPersistentTileScheduler(*(tuple(obj_list)), loc=self._loc)
 
 
 class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
@@ -190,7 +299,12 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             self.qkvo_dtype, self.o_layout, self.epi_tile, self.q_stage
         )
         sBias_layout = cute.make_layout(
-            (self.m_block_size, self.n_block_size, self.q_stage)
+            (self.m_block_size, self.n_block_size, self.q_stage),
+            stride=(
+                self.n_block_size,
+                1,
+                self.m_block_size * self.n_block_size,
+            ),
         )
 
         self.tma_copy_bytes = {
@@ -203,6 +317,9 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
                 ("V", mV, sV_layout),
             ]
         }
+        self.tma_copy_bytes["Bias"] = cute.size_in_bytes(
+            mBias.element_type, cute.select(sBias_layout, mode=[0, 1])
+        )
         tma_load_op = cpasync.CopyBulkTensorTileG2SOp(cta_group)
         tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
 
@@ -230,23 +347,27 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             tiled_mma_pv,
             cta_layout_vmnk.shape,
         )
+        tma_atom_Bias, mBias = cpasync.make_tiled_tma_atom(
+            tma_load_op,
+            mBias,
+            cute.select(sBias_layout, mode=[0, 1]),
+            (self.m_block_size, self.n_block_size),
+            1,
+        )
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
         tma_atom_O, mO = cpasync.make_tiled_tma_atom(
             tma_store_op, mO, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
         )
 
-        TileScheduler = self.TileScheduler
+        TileScheduler = BiasAfastPersistentTileScheduler
         _num_block_divisor = self.cta_tiler[0]
         num_batch_b = cute.size(mQ.shape[3])
         num_batch_a = cute.size(mQ.shape[4])
-        tile_sched_args = TileSchedulerArguments(
+        tile_sched_args = BiasTileSchedulerArguments(
             num_block=cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),
             num_head=cute.size(mQ.shape[2]),
-            num_batch=num_batch_a * num_batch_b,
-            seqlen_k=cute.size(mK.shape[0]),
-            headdim=mQ.shape[1],
-            headdim_v=mV.shape[0],
-            element_size=self.qkvo_dtype.width // 8,
+            num_batch_a=num_batch_a,
+            num_batch_b=num_batch_b,
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
@@ -266,6 +387,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         class SharedStorage:
             mbar_load_Q: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_load_KV: cute.struct.MemRange[Int64, self.kv_stage * 2]
+            mbar_load_Bias: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_S_full_P_full_O_rescaled: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_P_full_lastsplit: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_O_full: cute.struct.MemRange[Int64, self.q_stage * 2]
@@ -307,6 +429,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             tma_atom_Q,
             tma_atom_K,
             tma_atom_V,
+            tma_atom_Bias,
             tma_atom_O,
             softmax_scale_log2,
             softmax_scale,
@@ -342,6 +465,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         tma_atom_Q: cute.CopyAtom,
         tma_atom_K: cute.CopyAtom,
         tma_atom_V: cute.CopyAtom,
+        tma_atom_Bias: cute.CopyAtom,
         tma_atom_O: cute.CopyAtom,
         softmax_scale_log2: Float32,
         softmax_scale: Float32,
@@ -362,7 +486,13 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         tidx = cute.arch.thread_idx()[0]
 
         if warp_idx == self.load_warp_ids[0]:
-            for tma_atom in (tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_O):
+            for tma_atom in (
+                tma_atom_Q,
+                tma_atom_K,
+                tma_atom_V,
+                tma_atom_Bias,
+                tma_atom_O,
+            ):
                 cpasync.prefetch_descriptor(tma_atom)
 
         cta_layout_vmnk = cute.tiled_divide(
@@ -432,6 +562,14 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             consumer_group=mma_warp,
             tx_count=self.tma_copy_bytes["K"],
             cta_layout_vmnk=cta_layout_vmnk,
+            defer_sync=True,
+        )
+        pipeline_bias = pipeline_custom.PipelineTmaAsync.create(
+            barrier_storage=storage.mbar_load_Bias.data_ptr(),
+            num_stages=self.q_stage,
+            producer_group=tma_warp,
+            consumer_group=softmax_warps_cluster,
+            tx_count=self.tma_copy_bytes["Bias"],
             defer_sync=True,
         )
         pipeline_s_p_o = pipeline_custom.PipelineUmmaAsync.create(
@@ -572,14 +710,18 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
                 mQ,
                 mK,
                 mV,
+                mBias,
                 sQ,
                 sK,
                 sV,
+                sBias,
                 tma_atom_Q,
                 tma_atom_K,
                 tma_atom_V,
+                tma_atom_Bias,
                 pipeline_q,
                 pipeline_kv,
+                pipeline_bias,
                 block_info,
                 SeqlenInfoCls,
                 ab_divmod,
@@ -644,6 +786,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
                 sScale=sScale,
                 mLSE=mLSE,
                 bias_smem_barrier=bias_smem_barrier,
+                pipeline_bias=pipeline_bias,
                 pipeline_s_p_o=pipeline_s_p_o,
                 pipeline_p_lastsplit=pipeline_p_lastsplit,
                 pipeline_sm_stats=pipeline_sm_stats,
@@ -695,20 +838,26 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         mQ: cute.Tensor,
         mK: cute.Tensor,
         mV: cute.Tensor,
+        mBias: cute.Tensor,
         sQ: cute.Tensor,
         sK: cute.Tensor,
         sV: cute.Tensor,
+        sBias: cute.Tensor,
         tma_atom_Q: cute.CopyAtom,
         tma_atom_K: cute.CopyAtom,
         tma_atom_V: cute.CopyAtom,
+        tma_atom_Bias: cute.CopyAtom,
         pipeline_q: pipeline.PipelineAsync,
         pipeline_kv: pipeline.PipelineAsync,
+        pipeline_bias: pipeline.PipelineAsync,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         ab_divmod: FastDivmodDivisor,
         tile_scheduler: TileSchedulerProtocol,
     ):
         q_producer_phase = Int32(1)
+        bias_producer_phase_0 = Int32(1)
+        bias_producer_phase_1 = Int32(1)
         kv_producer_state = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, self.kv_stage
         )
@@ -778,15 +927,68 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
             load_K(block=n_block_max - 1, producer_state=kv_producer_state)
             load_Q(block=0, stage=0)
+            self.load_Bias(
+                tma_atom_Bias,
+                mBias,
+                sBias,
+                n_block_max - 1,
+                m_block,
+                head_idx,
+                batch_idx,
+                Int32(0),
+                bias_producer_phase_0,
+                pipeline_bias,
+            )
+            bias_producer_phase_0 ^= 1
             kv_producer_state.advance()
             if const_expr(self.q_stage == 2):
                 load_Q(block=1, stage=1)
+                self.load_Bias(
+                    tma_atom_Bias,
+                    mBias,
+                    sBias,
+                    n_block_max - 1,
+                    m_block,
+                    head_idx,
+                    batch_idx,
+                    Int32(1),
+                    bias_producer_phase_1,
+                    pipeline_bias,
+                )
+                bias_producer_phase_1 ^= 1
             q_producer_phase ^= 1
             load_V(block=n_block_max - 1, producer_state=kv_producer_state)
             kv_producer_state.advance()
             for i in cutlass.range(n_block_max - 1 - n_block_min, unroll=1):
                 n_block = n_block_max - 2 - i
                 load_K(block=n_block, producer_state=kv_producer_state)
+                self.load_Bias(
+                    tma_atom_Bias,
+                    mBias,
+                    sBias,
+                    n_block,
+                    m_block,
+                    head_idx,
+                    batch_idx,
+                    Int32(0),
+                    bias_producer_phase_0,
+                    pipeline_bias,
+                )
+                bias_producer_phase_0 ^= 1
+                if const_expr(self.q_stage == 2):
+                    self.load_Bias(
+                        tma_atom_Bias,
+                        mBias,
+                        sBias,
+                        n_block,
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                        Int32(1),
+                        bias_producer_phase_1,
+                        pipeline_bias,
+                    )
+                    bias_producer_phase_1 ^= 1
                 kv_producer_state.advance()
                 load_V(block=n_block, producer_state=kv_producer_state)
                 kv_producer_state.advance()
@@ -795,6 +997,41 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
 
         pipeline_kv.producer_tail(kv_producer_state)
         pipeline_q.producer_acquire_w_index_phase(self.q_stage - 1, q_producer_phase)
+        pipeline_bias.producer_acquire_w_index_phase(Int32(0), bias_producer_phase_0)
+        if const_expr(self.q_stage == 2):
+            pipeline_bias.producer_acquire_w_index_phase(Int32(1), bias_producer_phase_1)
+
+    @cute.jit
+    def load_Bias(
+        self,
+        tma_atom_Bias: cute.CopyAtom,
+        mBias: cute.Tensor,
+        sBias: cute.Tensor,
+        n_block: Int32,
+        m_block: Int32,
+        head_idx: Int32,
+        batch_idx: Int32,
+        stage: Int32,
+        phase: Int32,
+        pipeline_bias: pipeline.PipelineAsync,
+    ):
+        q_block = m_block * self.q_stage + stage
+        gBias = cute.local_tile(
+            mBias,
+            (self.m_block_size, self.n_block_size),
+            (q_block, n_block, head_idx, batch_idx, Int32(0)),
+        )
+        sBias_cur = sBias[None, None, stage]
+        load_Bias, _, _ = copy_utils.tma_get_copy_fn(
+            tma_atom_Bias,
+            0,
+            cute.make_layout(1),
+            gBias,
+            sBias_cur,
+            single_stage=True,
+        )
+        pipeline_bias.producer_acquire_w_index_phase(stage, phase)
+        load_Bias(tma_bar_ptr=pipeline_bias.sync_object_full.get_barrier(stage))
 
     @cute.jit
     def softmax_loop(
@@ -808,6 +1045,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         sScale: cute.Tensor,
         mLSE: cute.Tensor,
         bias_smem_barrier: pipeline.NamedBarrier,
+        pipeline_bias: pipeline.PipelineAsync,
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_p_lastsplit: pipeline.PipelineAsync,
         pipeline_sm_stats: pipeline.PipelineAsync,
@@ -847,6 +1085,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         tStP_r2t = thr_tmem_store.partition_D(tStP)
 
         mma_si_consumer_phase = Int32(0)
+        bias_consumer_phase = Int32(0)
         sm_stats_producer_phase = Int32(1)
 
         work_tile = tile_scheduler.initial_work_tile_info()
@@ -880,6 +1119,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
                 thr_mma_qk=thr_mma_qk,
                 mBias_cur=mBias_cur,
                 bias_smem_barrier=bias_smem_barrier,
+                pipeline_bias=pipeline_bias,
                 pipeline_s_p_o=pipeline_s_p_o,
                 pipeline_p_lastsplit=pipeline_p_lastsplit,
                 pipeline_sm_stats=pipeline_sm_stats,
@@ -900,8 +1140,13 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             )
             sm_stats_producer_phase ^= 1
 
-            mma_si_consumer_phase, sm_stats_producer_phase = softmax_step(
+            (
                 mma_si_consumer_phase,
+                bias_consumer_phase,
+                sm_stats_producer_phase,
+            ) = softmax_step(
+                mma_si_consumer_phase,
+                bias_consumer_phase,
                 sm_stats_producer_phase,
                 n_block_max - 1,
                 is_first=True,
@@ -910,8 +1155,13 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             n_block_max -= 1
             for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
                 n_block = n_block_max - n_tile - 1
-                mma_si_consumer_phase, sm_stats_producer_phase = softmax_step(
+                (
                     mma_si_consumer_phase,
+                    bias_consumer_phase,
+                    sm_stats_producer_phase,
+                ) = softmax_step(
+                    mma_si_consumer_phase,
+                    bias_consumer_phase,
                     sm_stats_producer_phase,
                     n_block,
                 )
@@ -931,12 +1181,14 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
     def softmax_step(
         self,
         mma_si_consumer_phase: Int32,
+        bias_consumer_phase: Int32,
         sm_stats_producer_phase: Int32,
         n_block: Int32,
         softmax: SoftmaxSm100,
         thr_mma_qk: cute.core.ThrMma,
         mBias_cur: cute.Tensor,
         bias_smem_barrier: pipeline.NamedBarrier,
+        pipeline_bias: pipeline.PipelineAsync,
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_p_lastsplit: pipeline.PipelineAsync,
         pipeline_sm_stats: pipeline.PipelineAsync,
@@ -952,7 +1204,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         stage: int | Int32,
         mask_fn: Optional[Callable] = None,
         is_first: bool = False,
-    ) -> Tuple[cute.Int32, cute.Int32]:
+    ) -> Tuple[cute.Int32, cute.Int32, cute.Int32]:
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
         tidx = cute.arch.thread_idx()[0] % (
             cute.arch.WARP_SIZE * len(self.softmax0_warp_ids)
@@ -963,15 +1215,14 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
         tScS_t2r = thr_tmem_load.partition_D(tScS)
         tScP_shape = (self.mma_tiler_qk[0] // thr_mma_qk.thr_id.shape, tilePlikeFP32)
 
-        self.load_bias_smem(
-            mBias_cur, sBias, n_block, m_block, stage, tidx, seqlen, bias_smem_barrier
-        )
+        pipeline_bias.consumer_wait_w_index_phase(stage, bias_consumer_phase)
         pipeline_s_p_o.consumer_wait_w_index_phase(stage, mma_si_consumer_phase)
         tSrS_t2r = cute.make_fragment(
             thr_tmem_load.partition_D(tScS).shape, self.acc_dtype
         )
         cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
         self.apply_bias_smem(tSrS_t2r, tScS_t2r, sBias, stage, softmax.softmax_scale)
+        pipeline_bias.consumer_release_w_index(stage)
 
         if const_expr(mask_fn is not None):
             mask_fn(tSrS_t2r, n_block=n_block)
@@ -1013,7 +1264,7 @@ class FlashAttentionBiasForwardSm100Smem(FlashAttentionForwardSm100):
             pipeline_p_lastsplit.producer_commit_w_index(stage)
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
         softmax.update_row_sum(tSrS_t2r.load(), acc_scale, is_first)
-        return mma_si_consumer_phase ^ 1, sm_stats_producer_phase ^ 1
+        return mma_si_consumer_phase ^ 1, bias_consumer_phase ^ 1, sm_stats_producer_phase ^ 1
 
     @cute.jit
     def load_bias_smem(
