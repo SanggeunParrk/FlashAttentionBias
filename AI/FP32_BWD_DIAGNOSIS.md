@@ -679,3 +679,110 @@ r2s for the new layout.
   `python FA4_fp32/bwd/debug_probe.py <probe_name>` to surface fp32 dQ
   wrongness in a controlled regime.
 - `FA4_fp32/bwd/test_q0.py` — Q=0 uniform-P regression test.
+
+---
+
+## Session 7 (2026-05-15): A1+ attempted, deeper root cause emerges
+
+Tried the A1+ plan from session 6: tcgen05-aware `tcgen05.make_tmem_copy
+(atom, tensor)` for t2r/r2t in fp32 + per-element write to sdS via the
+`(n_v, m_v)` coords from `tScS_t2r`.
+
+### Mechanical findings — fix would compile and write correctly
+
+- `tcgen05.make_tmem_copy(atom, tStS).get_slice(tidx)` (inlined slice;
+  storing `tiled_t2r` as an intermediate var triggers MLIR
+  "scf.yield live user" errors) builds without crashing.
+- For dS' SMEM write, the sdS native layout `(((32,2),8),1,16)` for fp32
+  D=32 decomposes cleanly as `M=(32, 2) strides (1, 4096)`,
+  `K=(8, 16) strides (32, 256)`. Built a 2D view
+  `sdS_2d = make_tensor(sdS.iterator, layout(((32,2),(8,16)), strides=...))`.
+  Per-element `sdS_2d[(vv, stage), (n_v%8, n_v//8)] = tdPrdS_cur[vv]`
+  writes through `sdS.iterator` which carries dQ MMA's swizzle, so byte
+  addresses match what the dQ MMA later reads.
+- Marker probe: writing `100.0` to every sdS cell propagated to dQ output
+  (`dQ abs max = 371`), confirming the write path is fully functional.
+
+### Why this still doesn't fix dQ — deeper bug discovered
+
+When the per-element write uses the actual `tdPrdS_cur[vv]` (real dS
+register values), `dQ` output **matches baseline within ~ε** — i.e., the
+fix achieves nothing visible. Tracing the dP register values via probe
+`V=e_0` (where expected `dP[m, n=0]=dout[m, 0]`, `dP[m, n>0]=0`):
+
+```
+[dP] tidx=0 stage=0  V[0] coord=(0,0) dP=-0.924  ← ✓ expected -0.925
+[dP] tidx=0 stage=0  V[1] coord=(0,1) dP=-0.180  ← ✗ expected -0.597
+[dP] tidx=0 stage=0  V[2] coord=(0,2) dP= 0.224  ← ✗ expected -0.033
+[dP] tidx=0 stage=0  V[3] coord=(0,3) dP=-0.262  ← ✗ expected -0.086
+[dP] tidx=0 stage=1  V[0] coord=(0,32) dP=-1.032 ← ?
+[dP] tidx=0 stage=1  V[1] coord=(0,33) dP= 0.141 ← ?
+```
+
+Even with the tcgen05 partition (which exposes the 2-stage iteration and
+gives the SAME inner V-strides `(1, 65536)` as the bf16-style partition),
+`tidx=0 V[1..]` still reads garbage. Stages 1's data (m=32..63 cells) is
+also corrupted.
+
+bf16 with the identical input setup reads CORRECT dP at every V slot.
+
+**So the TMEM data at addresses 1..7 of `tdPtdP` is GARBAGE for fp32 even
+though the QK^T MMA's tStS data at the SAME addresses is CORRECT.** Same
+`make_fragment_C` layout, same partition_S, same atoms — yet S reads
+clean, dP reads dirty.
+
+### Revised root cause hypothesis
+
+The TF32 MMA's actual cell-to-TMEM-address pattern for the dP MMA's output
+differs from what `make_fragment_C` claims (the layout). The QK^T MMA's
+output happens to land at the claim, but dP MMA's output doesn't.
+
+Possible deeper causes:
+1. dP MMA's K/N traversal order writes accumulator cells in a different
+   pattern than QK^T (despite identical MMA setup). For instance, K=8
+   reductions iterating in a different order may interleave writes that
+   complete out-of-claim.
+2. There's an MMA-private TMEM cell pattern that needs a hardware-specific
+   partition (not derivable from `make_fragment_C` alone). cute's
+   `tcgen05.make_tmem_copy` may have been designed for the QK^T-style use
+   case and not handle the V@dO^T variant.
+3. There's a pipeline / sync gap that the existing `pipeline_dP.consumer_wait`
+   doesn't fully cover (race between MMA write and read).
+
+The first two are software design issues. The third is a sync issue.
+Empirical observation that **bf16 same setup works** + that the dP MMA's
+setup is byte-identical to QK^T MMA points away from a generic sync bug
+toward something specific to TF32 MMA's microarchitectural behavior.
+
+### Status of A1+ fix attempt
+
+- All A1+ pieces are individually working (tcgen05 partition compiles,
+  per-element sdS write functions, dS values flow to dQ MMA).
+- But the *upstream* dS register values are garbage because tdPtdP read
+  is garbage. So fixing the r2s side alone doesn't fix dQ.
+
+The fix would need to additionally somehow re-shape the tdPtdP read to
+match the dP MMA's actual write pattern. **None of the partition styles
+tried (bf16 copy_utils / tcgen05.make_tmem_copy / get_tmem_load_op-derived)
+produces correct per-thread reads for tdPtdP under fp32**, despite all
+three working correctly for tStS.
+
+### Recommended next steps
+
+1. **Investigate dP MMA write pattern empirically.** Either via:
+   - SASS inspection of the generated MMA + atomic order
+   - Dumping tdPtdP via every conceivable read partition until one matches
+     `dout[m, 0]` for the V=e_0 case
+   - Comparison against working bf16 kernel's dP read partition
+2. **A3 path** (route P/dS through SMEM entirely) may sidestep this issue
+   because dP would be produced into SMEM with a layout we directly
+   control, avoiding the TMEM C-frag mystery.
+3. Asking upstream (cutlass-dsl team) whether SM100 TF32 m64nNk8 MMA C-frag
+   has a documented but non-`make_fragment_C` cell pattern for accumulator
+   N=tile_m=64.
+
+### Code state at end of session 7
+
+Reverted to session 6 state (Bug #1 fix only). The A1+ attempt was
+mechanically successful (compile, write propagation), but the dP-load
+bug it's downstream of remains. Committed code is unchanged from session 6.
