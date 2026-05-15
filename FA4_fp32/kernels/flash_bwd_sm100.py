@@ -2021,10 +2021,25 @@ class FlashAttentionBackwardSm100:
 
                 gdQaccum_cur = gdQaccum[None, None, m_block]
 
-                tdQrdQ_shape = (
-                    self.dQ_reduce_ncol,
-                    self.tile_hdim // 1 // self.dQ_reduce_ncol,
-                )
+                # Reshape the register fragment so [None, stage] iterates the
+                # store-time chunks. Mode 0 must match the per-thread V count
+                # per chunk; mode 1 must equal num_chunks.
+                #
+                # For bf16, V-per-chunk happens to equal dQ_reduce_ncol so the
+                # historical (dQ_reduce_ncol, tile_hdim // dQ_reduce_ncol)
+                # shape worked. For fp32 (TF32 m64nNk8 C-frag) the per-thread
+                # V-per-chunk is HALF of dQ_reduce_ncol — TF32 packs N across
+                # threads more tightly than fp16/bf16. Using dQ_reduce_ncol
+                # there over-strides the fragment, so stage=1 reads register
+                # addresses past the allocation → zeros → the second-half
+                # head_dim columns of gmem dq_accum stay zero → final dQ
+                # misses half of head_dim. Derive V/chunk from the fragment.
+                num_chunks_reshape = self.tile_hdim // self.dQ_reduce_ncol
+                if const_expr(fp32_dQ):
+                    per_thread_V_per_chunk = cute.size(tdQrdQ_t2r) // num_chunks_reshape
+                    tdQrdQ_shape = (per_thread_V_per_chunk, num_chunks_reshape)
+                else:
+                    tdQrdQ_shape = (self.dQ_reduce_ncol, num_chunks_reshape)
                 tdQrdQ = cute.make_tensor(tdQrdQ_t2r.iterator, tdQrdQ_shape)
 
                 for stage in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1])):
