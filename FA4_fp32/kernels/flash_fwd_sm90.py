@@ -960,6 +960,21 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         aux_tensors: Optional[list],
         fastdiv_mods=None,
     ):
+        # TF32 WGMMA path is WIP. The cute.gemm-based path below depends on
+        # MmaAtomSM90Type's fragment shape (broken for TF32 in cutlass DSL
+        # 4.5.x). The replacement lives in FA4_fp32/arch/{wgmma_tf32.py,
+        # sm90_utils_tf32.py}; until those stubs are completed + verified on
+        # an H100 with a CUDA 13 driver, fail fast here rather than emit a
+        # cryptic MLIR error during compile.
+        if const_expr(self.dtype is Float32 or self.dtype is cutlass.TFloat32):
+            raise NotImplementedError(
+                "FlashAttentionForwardSm90 fp32 path is not yet wired into mma(). "
+                "Inline-asm WGMMA TF32 primitives are ready in "
+                "FA4_fp32/arch/wgmma_tf32.py; complete the fragment-partition + "
+                "gemm body in FA4_fp32/arch/sm90_utils_tf32.py and replace the "
+                "sm90_utils.partition_fragment_ABC / gemm_zero_init / gemm_w_idx "
+                "calls below with the TF32 variants."
+            )
         warp_group_idx = cute.arch.make_warp_uniform(tidx // self.num_threads_per_warp_group)
         warp_group_thread_layout = cute.make_layout(
             self.num_wg_mma, stride=self.num_threads_per_warp_group
