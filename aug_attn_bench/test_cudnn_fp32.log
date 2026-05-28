@@ -1,0 +1,63 @@
+Collecting nvidia-cudnn-frontend
+  Downloading nvidia_cudnn_frontend-1.24.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (12 kB)
+Downloading nvidia_cudnn_frontend-1.24.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (3.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 15.5 MB/s  0:00:00
+Installing collected packages: nvidia-cudnn-frontend
+Successfully installed nvidia-cudnn-frontend-1.24.0
+/home/psk6950/FlashAttentionBias/aug_attn_bench/test_cudnn_fp32.py:36: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:858.)
+  out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+/home/psk6950/FlashAttentionBias/aug_attn_bench/test_cudnn_fp32.py:36: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+/home/psk6950/FlashAttentionBias/aug_attn_bench/test_cudnn_fp32.py:36: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:860.)
+  out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+/home/psk6950/FlashAttentionBias/aug_attn_bench/test_cudnn_fp32.py:36: UserWarning: Flash attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:540.)
+  out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+/home/psk6950/FlashAttentionBias/aug_attn_bench/test_cudnn_fp32.py:36: UserWarning: CuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:862.)
+  out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+/home/psk6950/FlashAttentionBias/aug_attn_bench/test_cudnn_fp32.py:36: UserWarning: Expected query, key and value to all be of dtype: {Half, BFloat16}. Got Query dtype: float, Key dtype: float, and Value dtype: float instead. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:91.)
+  out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+torch: 2.8.0+cu126
+cudnn version (torch): 91002
+device: NVIDIA H100 80GB HBM3
+
+======================================================================
+Path 1: torch SDPA with CUDNN_ATTENTION backend forced (fp32)
+======================================================================
+FAILED: RuntimeError: No available kernel. Aborting execution.
+
+======================================================================
+Path 2: cudnn-frontend Python API (cudnn.pygraph SDPA, fp32)
+======================================================================
+cudnn-frontend version: 1.24.0
+cudnn backend version: 91002
+OK: output shape=(2, 8, 1024, 64), dtype=torch.float32
+vs reference SDPA(fp32 math): max abs err = 1.073e-06, mean abs err = 3.416e-08
+
+======================================================================
+Bench: cuDNN fp32 SDPA  B=2 H=8 L=1024 D=64
+======================================================================
+cuDNN fp32 SDPA : 0.170 ms
+torch SDPA fp32 (math fallback): 0.154 ms
+speedup: 0.91x
+
+======================================================================
+Bench: cuDNN fp32 SDPA  B=2 H=8 L=2048 D=64
+======================================================================
+cuDNN fp32 SDPA : 0.707 ms
+torch SDPA fp32 (math fallback): 0.659 ms
+speedup: 0.93x
+
+======================================================================
+Bench: cuDNN fp32 SDPA  B=2 H=8 L=4096 D=64
+======================================================================
+cuDNN fp32 SDPA : 2.597 ms
+torch SDPA fp32 (math fallback): 2.112 ms
+speedup: 0.81x
+
+======================================================================
+Bench: cuDNN fp32 SDPA  B=2 H=8 L=8192 D=64
+======================================================================
+cuDNN fp32 SDPA : 10.365 ms
+torch SDPA fp32 (math fallback): 8.244 ms
+speedup: 0.80x
+

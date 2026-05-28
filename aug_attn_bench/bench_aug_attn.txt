@@ -1,0 +1,18 @@
+GPU: NVIDIA H100 80GB HBM3  dtype=bf16
+A=48 B=1 H=16 D=48
+QK backend: SDPA
+warmup=20 iters=50
+
+== FWD (ms / call) ==
+     L        fused        split      ratio
+    64       0.0949       0.0776     0.818x
+   128       0.0959       0.0842     0.878x
+   256       0.1751       0.2483     1.418x
+   384       0.3628       0.4745     1.308x
+
+== FWDBWD (ms / call) ==
+     L        fused        split      ratio
+    64       0.4749       0.6111     1.287x
+   128       0.4228       0.6152     1.455x
+   256       1.1274       0.9885     0.877x
+   384       2.3790       1.8796     0.790x

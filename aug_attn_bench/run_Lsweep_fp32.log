@@ -1,0 +1,26 @@
+=== node: node01
+NVIDIA H100 80GB HBM3, 81080 MiB
+/home/psk6950/FlashAttentionBias/aug_attn_bench/.venv/lib/python3.12/site-packages/torch/_inductor/compile_fx.py:282: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+[bench] flash_attn.cute unavailable (ModuleNotFoundError("No module named 'flash_attn'")); using SDPA for QK.
+GPU: NVIDIA H100 80GB HBM3  dtype=fp32
+A=48 B=1 H=4 D=32
+QK backend: SDPA
+warmup=20 iters=50
+
+== FWD (ms / call) ==
+     L        fused        split      ratio
+  1024       0.7049       1.7150     2.433x
+  2048       2.8698       6.2701     2.185x
+  4096      11.8579      24.4022     2.058x
+  8192      45.8734      97.3365     2.122x
+
+== FWDBWD (ms / call) ==
+     L        fused        split      ratio
+  1024       3.8891       5.6494     1.453x
+  2048      15.8946      20.9647     1.319x
+  4096      61.7851      82.7819     1.340x
+  8192     249.9268     339.8842     1.360x
+
+wrote /home/psk6950/FlashAttentionBias/aug_attn_bench/bench_aug_attn_Lsweep_H4_D32_fp32.txt
+=== done
