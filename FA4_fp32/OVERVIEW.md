@@ -79,22 +79,45 @@ Same spirit as the B200 branch (`origin/B200`), but keeping SM90 instead of SM10
 
 ## What still needs stripping (next sessions)
 
-The SM90 kernel body itself still contains code for features that the H100 build
-doesn't need. Per B200's `2cad329 Strip FA4_fp32 down to SM100 MHA-only happy path`
-and subsequent dead-arg cleanups, the targets are:
+### Done
+* `interface.py`: 2018 → 455 LOC (B200 verbatim copy + SM90 repoint).
+* `kernels/flash_fwd.py`: deleted FlashAttentionForwardSm80 (1232 → 564 LOC).
+  Removed `score_mod` / `mask_mod` / `has_aux_tensors` / `softcap` /
+  `learnable_sink` kwargs from `FlashAttentionForwardBase.__init__`;
+  `self.score_mod` / `self.mask_mod` forced to None.
+* `kernels/flash_fwd_sm90.py`: dropped `learnable_sink`, `aux_tensors`,
+  `score_mod_fn`, `mPageTable`, `paged_kv_non_tma` kwargs; deleted the
+  sink_val init block, `apply_score_mod` method, score_mod_fn threading;
+  block-sparsity / paged-KV / PackGQA imports replaced with stubs.
+  `mask_mod=self.mask_mod` dropped from `partial(mask_fn, ...)` chains.
+  1551 → 1470 LOC.
+* Deleted SM100 / SM120 fwd+bwd kernels, SM80 bwd, SplitKV combine.
+* CUDA 12.9 runtime path verified on node01.
 
-1. **`kernels/flash_fwd_sm90.py`** — strip:
-   - `pack_gqa`, `paged_kv_non_tma`, `mPageTable`, `PagedKVManager`
-   - `blocksparse_tensors`, `BlockSparseTensors`, `use_block_sparsity`
-   - `cu_seqlens_q/k`, `seqused_q/k` (varlen)
-   - `is_causal`, `is_local`, `window_size_*`
-   - `learnable_sink`, `softcap`, `score_mod`, `mask_mod`, `aux_tensors`
-   - `q_subtile_factor`
-2. **`kernels/flash_fwd.py::FlashAttentionForwardBase`** — same args.
-3. **`core/pack_gqa.py`, `core/paged_kv.py`, `sparsity/`** — fully delete once SM90 stops referencing them.
-4. **`core/tile_scheduler.py`** — strip `SingleTileVarlenScheduler`, LPT scheduler, persistent variants we don't use.
-5. **`core/mask.py`** — strip causal/local masking; keep only seqlen-edge masking.
-6. **`interface.py`** — strip ~1400 LOC of kwargs and validation tied to the above features. Target ~440 LOC like B200's.
+### Still alive as const_expr-dead code (cute.compile DCE handles them)
+The following branches still exist in `flash_fwd_sm90.py` but are gated by
+`if const_expr(...)` with the gating value baked to False/None by the
+interface, so they compile away cleanly:
+
+* `pack_gqa` / `qhead_per_kvhead`: interface always passes
+  `pack_gqa=False`, `qhead_per_kvhead=1` (MHA).
+* `mCuSeqlensQ` / `mCuSeqlensK` / `mSeqUsedQ` / `mSeqUsedK` (varlen):
+  interface never sets them.
+* `is_causal`, `is_local`, `window_size_*`: interface forces False / None.
+* `blocksparse_tensors`: interface never passes; the `if const_expr(not
+  self.use_block_sparsity): ...` else-branches are dead.
+
+Eliminating these branches at the source level is purely cosmetic — each
+removal touches dozens of small sites along the positional-argument chain
+between `__call__`, `kernel`, `load`, `mma`, the three `mma_one_n_block_*`
+variants, and `epilogue`. Defer to a dedicated "physical strip" pass when
+we have stronger regression coverage.
+
+### Files that can be deleted once `flash_bwd_sm90.py` is also stripped
+* `FA4_fp32/core/pack_gqa.py`
+* `FA4_fp32/core/paged_kv.py`
+* `FA4_fp32/sparsity/`
+* `FA4_fp32/core/tile_scheduler.py::{SingleTileVarlenScheduler, SingleTileLPTBwdScheduler}`
 
 ## TF32 WGMMA fp32 path (status from earlier commits on this branch)
 
