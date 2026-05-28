@@ -50,25 +50,43 @@ from FA4_fp32.infra import fa_logging
 from FA4_fp32.infra.cute_dsl_utils import (
     to_cute_tensor, to_cute_aux_tensor, get_aux_tensor_metadata, get_broadcast_dims,
 )
-from FA4_fp32.kernels.flash_fwd import FlashAttentionForwardSm80
+# H100 (SM90) only. SM80 / SM100 / SM120 paths + SplitKV combine deleted in
+# the B200-style strip (see FA4_fp32/OVERVIEW.md).
 from FA4_fp32.kernels.flash_fwd_sm90 import FlashAttentionForwardSm90
-from FA4_fp32.kernels.flash_fwd_sm100 import FlashAttentionForwardSm100
-from FA4_fp32.kernels.flash_fwd_sm120 import FlashAttentionForwardSm120
 from FA4_fp32.kernels.flash_bwd_preprocess import FlashAttentionBackwardPreprocess
-from FA4_fp32.kernels.flash_bwd import FlashAttentionBackwardSm80
 from FA4_fp32.kernels.flash_bwd_sm90 import FlashAttentionBackwardSm90
-from FA4_fp32.kernels.flash_bwd_sm100 import FlashAttentionBackwardSm100
-from FA4_fp32.kernels.flash_bwd_sm120 import FlashAttentionBackwardSm120
 from FA4_fp32.kernels.flash_bwd_postprocess import FlashAttentionBackwardPostprocess
-from FA4_fp32.kernels.flash_fwd_combine import FlashAttentionForwardCombine
 
-from FA4_fp32.sparsity.block_sparsity import (
-    BlockSparseTensorsTorch,
-    get_sparse_q_block_size,
-    to_cute_block_sparse_tensors,
-    normalize_block_sparse_config,
-    normalize_block_sparse_config_bwd,
-)
+
+# SplitKV combine kernel removed (SM90 disallows is_split_kv). Stub for the
+# dead-code paths in interface.py that still reference the symbol.
+class FlashAttentionForwardCombine:
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError(
+            "SplitKV combine was removed in the B200-style strip; SM90 path "
+            "does not support is_split_kv."
+        )
+
+# Block sparsity removed — provide minimal stubs so kwarg defaults still work.
+class BlockSparseTensorsTorch:
+    """Stub for the removed block-sparsity feature. Callers should pass None."""
+    pass
+
+
+def get_sparse_q_block_size(block_sparse_tensors, seqlen_q):
+    return None
+
+
+def to_cute_block_sparse_tensors(*args, **kwargs):
+    raise NotImplementedError("Block sparsity was removed in the B200-style strip.")
+
+
+def normalize_block_sparse_config(*args, **kwargs):
+    raise NotImplementedError("Block sparsity was removed in the B200-style strip.")
+
+
+def normalize_block_sparse_config_bwd(*args, **kwargs):
+    raise NotImplementedError("Block sparsity was removed in the B200-style strip.")
 
 def _parse_arch_str(arch_str):
     """Parse arch string (e.g. 'sm_80', 'sm_90a', '80', '100') to int (e.g. 80, 90, 100)."""
@@ -417,7 +435,10 @@ def _flash_attn_fwd(
             )
         ), "inputs must be on CUDA device"
     arch = _get_device_arch() if _arch is None else _arch
-    assert arch // 10 in [8, 9, 10, 11, 12], "Unsupported compute capability. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
+    assert arch // 10 == 9, (
+        f"Stripped H100 build supports only SM 9.x (Hopper). Got arch={arch}. "
+        "Restore from B200 branch or upstream FA4 if you need SM 8/10/11/12."
+    )
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
     if arch // 10 not in [8, 12]:
@@ -687,103 +708,31 @@ def _flash_attn_fwd(
         if aux_tensors is not None:
             cute_aux_tensors = [to_cute_aux_tensor(buf) for buf in aux_tensors]
 
-        if arch // 10 == 8:
-            assert page_table is None, "paged KV not supported on SM 8.0"
-            assert not is_split_kv, "SplitKV not supported on SM 8.0"
-            fa_fwd = FlashAttentionForwardSm80(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                is_causal=causal,
-                is_local=local,
-                pack_gqa=pack_gqa,
-                tile_m=tile_m,
-                tile_n=tile_n,
-                num_stages=1,
-                num_threads=num_threads,
-                Q_in_regs=False,
-                score_mod=score_mod,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-            )
-        elif arch // 10 == 9:
-            assert not is_split_kv, "SplitKV not supported on SM 9.0"
-            fa_fwd = FlashAttentionForwardSm90(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                is_causal=causal,
-                is_local=local,
-                pack_gqa=pack_gqa,
-                tile_m=tile_m,
-                tile_n=tile_n,
-                # fp32 doubles per-stage SMEM cost; one K/V stage keeps the
-                # tile within H100's 228 KB SMEM budget.
-                num_stages=1 if q.dtype == torch.float32 else 2,
-                num_threads=num_threads,
-                Q_in_regs=False,
-                intra_wg_overlap=intra_wg_overlap,
-                mma_pv_is_rs=mma_pv_is_rs,
-                mask_mod=mask_mod,
-                score_mod=score_mod,
-                has_aux_tensors=aux_tensors is not None,
-                q_subtile_factor=q_subtile_factor,
-                paged_kv_non_tma=page_size not in [None, tile_n],
-            )
-        elif arch // 10 in [10, 11]:
-            fa_fwd = FlashAttentionForwardSm100(
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead=qhead_per_kvhead,
-                is_causal=causal,
-                is_local=local,
-                is_split_kv=is_split_kv,
-                pack_gqa=pack_gqa,
-                m_block_size=tile_m,
-                n_block_size=tile_n,
-                q_stage=q_stage,
-                is_persistent=not causal
-                    and not local
-                    and cu_seqlens_q is None
-                    and seqused_q is None
-                    and not is_split_kv,
-                score_mod=score_mod,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                paged_kv_non_tma=page_size not in [None, tile_n],
-                is_varlen_q=cu_seqlens_q is not None or seqused_q is not None,
-                q_subtile_factor=q_subtile_factor,
-                use_2cta_instrs=use_2cta_instrs,
-                use_clc_scheduler=requested_use_clc_scheduler,
-            )
-        elif arch // 10 == 12:
-            # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
-            assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
-            assert page_table is None, "Paged KV not supported on SM 12.0 in this PR"
-            assert not is_split_kv, "SplitKV not supported on SM 12.0 in this PR"
-            fa_fwd = FlashAttentionForwardSm120(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                is_causal=causal,
-                is_local=local,
-                pack_gqa=pack_gqa,
-                tile_m=tile_m,
-                tile_n=tile_n,
-                num_stages=1,
-                num_threads=num_threads,
-                Q_in_regs=False,
-                score_mod=score_mod,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-            )
-        else:
-            raise ValueError(
-                f"Unsupported compute capability: {arch}. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
-            )
+        # SM90 (H100) only — see top-of-file note.
+        assert not is_split_kv, "SplitKV not supported on SM 9.0"
+        fa_fwd = FlashAttentionForwardSm90(
+            dtype,
+            head_dim,
+            head_dim_v,
+            qhead_per_kvhead,
+            is_causal=causal,
+            is_local=local,
+            pack_gqa=pack_gqa,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            # fp32 doubles per-stage SMEM cost; one K/V stage keeps the
+            # tile within H100's 228 KB SMEM budget.
+            num_stages=1 if q.dtype == torch.float32 else 2,
+            num_threads=num_threads,
+            Q_in_regs=False,
+            intra_wg_overlap=intra_wg_overlap,
+            mma_pv_is_rs=mma_pv_is_rs,
+            mask_mod=mask_mod,
+            score_mod=score_mod,
+            has_aux_tensors=aux_tensors is not None,
+            q_subtile_factor=q_subtile_factor,
+            paged_kv_non_tma=page_size not in [None, tile_n],
+        )
         # TODO: check @can_implement
         _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
             fa_fwd,
@@ -1022,7 +971,9 @@ def _flash_attn_bwd(
     dlse: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     arch = _get_device_arch()
-    assert arch // 10 in [9, 10, 11, 12], "Unsupported compute capability. Supported: 9.x, 10.x, 11.x, 12.x"
+    assert arch // 10 == 9, (
+        f"Stripped H100 build (bwd) supports only SM 9.x (Hopper). Got arch={arch}."
+    )
     sparse_q = None
     if block_sparse_tensors is not None and arch // 10 == 9:
         sparse_q = block_sparse_tensors.block_size[0] if block_sparse_tensors.block_size is not None else 128
@@ -1432,77 +1383,35 @@ def _flash_attn_bwd(
             if t is not None else None
             for t in (dQ_semaphore, dK_semaphore, dV_semaphore)
         ]
-        if arch // 10 in [8, 12]:
-            flash_bwd_obj_cls = FlashAttentionBackwardSm120 if arch // 10 == 12 else FlashAttentionBackwardSm80
-            fa_bwd_obj = flash_bwd_obj_cls(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                m_block_size,
-                n_block_size,
-                num_stages_Q,
-                num_stages_dO,
-                num_threads,
-                pack_gqa,
-                causal,
-                SdP_swapAB,
-                dKV_swapAB,
-                dQ_swapAB,
-                AtomLayoutMSdP,
-                AtomLayoutNdKV,
-                AtomLayoutMdQ,
-                V_in_regs=V_in_regs,
-                score_mod=score_mod,
-                score_mod_bwd=score_mod_bwd,
-            )
-        elif arch // 10 == 9:
-            fa_bwd_obj = FlashAttentionBackwardSm90(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                causal,
-                is_local=local,
-                deterministic=deterministic,
-                tile_m=m_block_size,
-                tile_n=n_block_size,
-                Q_stage=num_stages_Q,
-                dO_stage=num_stages_dO,
-                PdS_stage=num_stages_PdS,
-                SdP_swapAB=SdP_swapAB,
-                dKV_swapAB=dKV_swapAB,
-                dQ_swapAB=dQ_swapAB,
-                AtomLayoutMSdP=AtomLayoutMSdP,
-                AtomLayoutNdKV=AtomLayoutNdKV,
-                AtomLayoutMdQ=AtomLayoutMdQ,
-                num_threads=num_threads,
-                V_in_regs=V_in_regs,
-                score_mod=score_mod,
-                score_mod_bwd=score_mod_bwd,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                subtile_factor=subtile_factor,
-                dQ_single_wg=dQ_single_wg,
-            )
-        else:
-            fa_bwd_obj = FlashAttentionBackwardSm100(
-                head_dim,
-                head_dim_v,
-                is_causal=causal,
-                is_local=local,
-                qhead_per_kvhead=qhead_per_kvhead,
-                tile_m=m_block_size,
-                tile_n=n_block_size,
-                cluster_size=cluster_size,
-                use_2cta_instrs=use_2cta_instrs,
-                deterministic=deterministic,
-                score_mod=score_mod,
-                score_mod_bwd=score_mod_bwd,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                subtile_factor=subtile_factor,
-            )
+        # SM90 only (Hopper) — see top-of-file note.
+        fa_bwd_obj = FlashAttentionBackwardSm90(
+            dtype,
+            head_dim,
+            head_dim_v,
+            qhead_per_kvhead,
+            causal,
+            is_local=local,
+            deterministic=deterministic,
+            tile_m=m_block_size,
+            tile_n=n_block_size,
+            Q_stage=num_stages_Q,
+            dO_stage=num_stages_dO,
+            PdS_stage=num_stages_PdS,
+            SdP_swapAB=SdP_swapAB,
+            dKV_swapAB=dKV_swapAB,
+            dQ_swapAB=dQ_swapAB,
+            AtomLayoutMSdP=AtomLayoutMSdP,
+            AtomLayoutNdKV=AtomLayoutNdKV,
+            AtomLayoutMdQ=AtomLayoutMdQ,
+            num_threads=num_threads,
+            V_in_regs=V_in_regs,
+            score_mod=score_mod,
+            score_mod_bwd=score_mod_bwd,
+            mask_mod=mask_mod,
+            has_aux_tensors=aux_tensors is not None,
+            subtile_factor=subtile_factor,
+            dQ_single_wg=dQ_single_wg,
+        )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
         sparse_tensors_compile = None
