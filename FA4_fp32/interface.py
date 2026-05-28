@@ -338,7 +338,9 @@ def _flash_attn_bwd(
 
     head_dim_rounded = (head_dim + 32 - 1) // 32 * 32
 
-    dq_accum = torch.empty(batch_size, num_head, seqlen_q_rounded * head_dim_rounded,
+    # Zero dq_accum here as a safety net — the bwd kernel writes per-tile and
+    # the preprocess `gdQaccum.fill(0)` path may have been disabled by the strip.
+    dq_accum = torch.zeros(batch_size, num_head, seqlen_q_rounded * head_dim_rounded,
                            dtype=torch.float32, device=device)
     dpsum = torch.empty(batch_size, num_head, seqlen_q_rounded, dtype=torch.float32, device=device)
     lse_log2 = torch.empty(batch_size, num_head, seqlen_q_rounded, dtype=torch.float32, device=device)
@@ -364,6 +366,10 @@ def _flash_attn_bwd(
             to_cute_tensor(t) for t in (dq_accum, dpsum, lse_log2)
         ]
 
+        # SMEM-aware layout knobs tuned for head_dim <= 128 on SM90 (from
+        # upstream FA4's _tile_size_bwd_sm90 table for the head_dim <= 64
+        # and head_dim <= 128 rows). Default `SdP_swapAB=False` does not fit
+        # in H100's 228 KiB SMEM for m=n=128, tile-stages 2/2/2.
         fa_bwd_obj = FlashAttentionBackwardSm90(
             dtype,
             head_dim,
@@ -374,6 +380,13 @@ def _flash_attn_bwd(
             deterministic=False,
             tile_m=m_block_size,
             tile_n=n_block_size,
+            Q_stage=2, dO_stage=2, PdS_stage=2,
+            SdP_swapAB=True,
+            dKV_swapAB=False,
+            dQ_swapAB=False,
+            AtomLayoutMSdP=1,
+            AtomLayoutNdKV=2,
+            AtomLayoutMdQ=2 if head_dim <= 64 else 1,
             num_threads=num_threads,
             score_mod=None,
             score_mod_bwd=None,

@@ -213,9 +213,7 @@ class FlashAttentionBackwardPostprocess:
         mdQaccum: cute.Tensor,
         mdQ: cute.Tensor,
         scale: cutlass.Float32,
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mSeqUsedQ: Optional[cute.Tensor],
-        # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
+        # Always keep stream as the last parameter (EnvStream via TVM FFI).
         stream: cuda.CUstream = None,
     ):
         # Get the data type and check if it is fp16 or bf16
@@ -235,29 +233,15 @@ class FlashAttentionBackwardPostprocess:
             cute.size_in_bytes(self.dtype, self.sdQ_layout),
         )
 
-        if const_expr(mCuSeqlensQ is not None):
-            TileScheduler = SingleTileVarlenScheduler
-            num_head = mdQ.shape[1]
-            num_batch = mCuSeqlensQ.shape[0] - 1
-            num_block = cute.ceil_div(mdQ.shape[0], self.tile_m)
-        else:
-            TileScheduler = SingleTileScheduler
-            num_head = mdQ.shape[2]
-            num_batch = mdQ.shape[0]
-            num_block = cute.ceil_div(mdQ.shape[1], self.tile_m)
-
+        TileScheduler = SingleTileScheduler
         tile_sched_args = TileSchedulerArguments(
-            num_block=num_block,
-            num_head=num_head,
-            num_batch=num_batch,
-            num_splits=1,
+            num_block=cute.ceil_div(mdQ.shape[1], self.tile_m),
+            num_head=mdQ.shape[2],
+            num_batch=mdQ.shape[0],
             seqlen_k=0,
             headdim=mdQ.shape[2],
             headdim_v=0,
-            total_q=mdQ.shape[0],
-            tile_shape_mn=(self.tile_m, 1),
-            mCuSeqlensQ=mCuSeqlensQ,
-            mSeqUsedQ=mSeqUsedQ,
+            element_size=self.dtype.width // 8,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
@@ -267,8 +251,6 @@ class FlashAttentionBackwardPostprocess:
         self.kernel(
             mdQaccum,
             mdQ,
-            mCuSeqlensQ,
-            mSeqUsedQ,
             scale,
             self.tiled_mma,
             self.dQ_swapAB,
@@ -291,8 +273,6 @@ class FlashAttentionBackwardPostprocess:
         self,
         mdQaccum: cute.Tensor,
         mdQ: cute.Tensor,
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mSeqUsedQ: Optional[cute.Tensor],
         scale: cutlass.Float32,
         tiled_mma: cute.TiledMma,
         dQ_swapAB: cutlass.Constexpr,
@@ -333,39 +313,10 @@ class FlashAttentionBackwardPostprocess:
             # Get the appropriate tiles for this thread block.
             # ///////////////////////////////////////////////////////////////////////////////
 
-            seqlen = SeqlenInfoQK.create(
-                batch_idx,
-                mdQ.shape[1],
-                0,
-                mCuSeqlensQ=mCuSeqlensQ,
-                mCuSeqlensK=None,
-                mSeqUsedQ=mSeqUsedQ,
-                mSeqUsedK=None,
-                tile_m=self.tile_m * self.cluster_size,
-            )
-            if const_expr(not seqlen.has_cu_seqlens_q):
-                mdQ_cur = mdQ[batch_idx, None, head_idx, None]
-                mdQaccum_cur = mdQaccum[batch_idx, head_idx, None]
-                head_dim = mdQ.shape[3]
-            else:
-                padded_offset_q = seqlen.padded_offset_q
-                mdQ_cur = cute.domain_offset((seqlen.offset_q, 0), mdQ[None, head_idx, None])
-                mdQaccum_cur = cute.domain_offset(
-                    (padded_offset_q * self.tile_hdim,), mdQaccum[head_idx, None]
-                )
-                head_dim = mdQ.shape[2]
-
-                # HACK: Compiler doesn't seem to recognize that padding
-                # by padded_offset_q * self.tile_hdim keeps alignment
-                # since statically divisible by 4
-
-                mdQaccum_cur_ptr = cute.make_ptr(
-                    dtype=mdQaccum_cur.element_type,
-                    value=mdQaccum_cur.iterator.toint(),
-                    mem_space=mdQaccum_cur.iterator.memspace,
-                    assumed_align=mdQaccum.iterator.alignment,
-                )
-                mdQaccum_cur = cute.make_tensor(mdQaccum_cur_ptr, mdQaccum_cur.layout)
+            seqlen = SeqlenInfoQK.create(batch_idx, mdQ.shape[1], 0)
+            mdQ_cur = mdQ[batch_idx, None, head_idx, None]
+            mdQaccum_cur = mdQaccum[batch_idx, head_idx, None]
+            head_dim = mdQ.shape[3]
 
             gdQaccum = cute.local_tile(mdQaccum_cur, (self.tile_m * self.tile_hdim,), (m_block,))
             gdQ = cute.local_tile(mdQ_cur, (self.tile_m, self.tile_hdim), (m_block, 0))
