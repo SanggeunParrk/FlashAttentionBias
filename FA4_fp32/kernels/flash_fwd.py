@@ -160,10 +160,6 @@ class FlashAttentionForwardBase:
         mV_type: Type[cutlass.Numeric],
         mO_type: Type[cutlass.Numeric],
         mLSE_type: Type[cutlass.Numeric] | None,
-        mCuSeqlensQ_type: Type[cutlass.Numeric] | None,
-        mCuSeqlensK_type: Type[cutlass.Numeric] | None,
-        mSeqUsedQ_type: Type[cutlass.Numeric] | None,
-        mSeqUsedK_type: Type[cutlass.Numeric] | None,
     ):
         # Q/K/V/O must share dtype; allow fp16/bf16/fp32 (fp32 uses TF32 MMA).
         if const_expr(not (mQ_type == mK_type == mV_type == mO_type)):
@@ -172,14 +168,6 @@ class FlashAttentionForwardBase:
             raise TypeError("Only Float16, BFloat16, or Float32 (TF32 MMA) is supported")
         if const_expr(mLSE_type not in [None, Float32]):
             raise TypeError("LSE tensor must be Float32")
-        if const_expr(mCuSeqlensQ_type not in [None, Int32]):
-            raise TypeError("cu_seqlens_q tensor must be Int32")
-        if const_expr(mCuSeqlensK_type not in [None, Int32]):
-            raise TypeError("cu_seqlens_k tensor must be Int32")
-        if const_expr(mSeqUsedQ_type not in [None, Int32]):
-            raise TypeError("seqused_q tensor must be Int32")
-        if const_expr(mSeqUsedK_type not in [None, Int32]):
-            raise TypeError("seqused_k tensor must be Int32")
         assert mQ_type == self.dtype
 
     def _setup_attributes(self):
