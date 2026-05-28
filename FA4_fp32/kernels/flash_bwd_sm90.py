@@ -346,24 +346,24 @@ class FlashAttentionBackwardSm90:
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         softmax_scale: Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
-        mSeqUsedQ: Optional[cute.Tensor] = None,
-        mSeqUsedK: Optional[cute.Tensor] = None,
-        window_size_left: Int32 | int | None = None,
-        window_size_right: Int32 | int | None = None,
-        mdQ_semaphore: Optional[cute.Tensor] = None,
-        mdK_semaphore: Optional[cute.Tensor] = None,
-        mdV_semaphore: Optional[cute.Tensor] = None,
-        aux_tensors: Optional[list] = None,
-        blocksparse_tensors: Optional[BlockSparseTensors] = None,
-        # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
-        # For GQA (qhead_per_kvhead > 1), multiple Q heads accumulate into the same dK/dV,
-        # so we need the float32 accum path + postprocess.
-        # For varlen_k with qhead_per_kvhead == 1, we use ragged TMA tensors.
-        self.varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
+        # MHA happy path: non-varlen, non-causal, non-local, non-sparse,
+        # non-deterministic. Locals for const_expr-dead branches that still
+        # reference these names in the kernel body.
+        self.varlen_k = False
+        self.is_varlen_q = False
+        mCuSeqlensQ = None
+        mCuSeqlensK = None
+        mSeqUsedQ = None
+        mSeqUsedK = None
+        window_size_left = None
+        window_size_right = None
+        mdQ_semaphore = None
+        mdK_semaphore = None
+        mdV_semaphore = None
+        aux_tensors = None
+        blocksparse_tensors = None
 
         self._check_type(
             *(
@@ -499,34 +499,16 @@ class FlashAttentionBackwardSm90:
         else:
             tma_atom_dK = tma_atom_dV = tma_tensor_dK = tma_tensor_dV = None
 
-        if const_expr(mCuSeqlensK is not None or mSeqUsedK is not None):
-            TileScheduler = SingleTileVarlenScheduler
-        elif const_expr(self.deterministic):
-            TileScheduler = SingleTileLPTBwdScheduler
-        else:
-            TileScheduler = SingleTileScheduler
-        self.spt = (self.is_causal or self.is_local) and self.deterministic
+        TileScheduler = SingleTileScheduler
+        self.spt = False  # (is_causal or is_local) and deterministic — all False.
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mK.shape[0]), self.tile_n),
-            cute.size(mQ.shape[2]),
-            cute.size(mK.shape[3])
-            if const_expr(mCuSeqlensK is None)
-            else cute.size(mCuSeqlensK.shape[0] - 1),  # num_batch
-            1,  # num_splits
-            cute.size(mQ.shape[0]),  # pass seqlen_q or total_q for seqlen_k
-            mQ.shape[1],  # headdim
-            mV.shape[1],  # headdim_v
-            total_q=cute.size(mK.shape[0])
-            if const_expr(mCuSeqlensK is not None)
-            else cute.size(mK.shape[0]) * cute.size(mK.shape[3]),
-            tile_shape_mn=(self.tile_n, self.tile_m),  # Swapping the role of Q & K
-            mCuSeqlensQ=mCuSeqlensK,
-            mSeqUsedQ=mSeqUsedK,
-            qhead_per_kvhead_packgqa=1,
+            num_block=cute.ceil_div(cute.size(mK.shape[0]), self.tile_n),
+            num_head=cute.size(mQ.shape[2]),
+            num_batch=cute.size(mK.shape[3]),
+            seqlen_k=cute.size(mQ.shape[0]),  # role-swapped: K's "seqlen" is Q's.
+            headdim=mQ.shape[1],
+            headdim_v=mV.shape[1],
             element_size=self.dtype.width // 8,
-            is_persistent=False,
-            lpt=self.spt,
-            head_swizzle=self.deterministic,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
@@ -1200,7 +1182,6 @@ class FlashAttentionBackwardSm90:
                 tiled_mma_SdP,
                 sP_cpy,
                 tidx,
-                self.arch,
                 transpose=self.SdP_swapAB,
                 position_independent=True,
                 major_mode_size=mms_PdS,
@@ -1210,7 +1191,6 @@ class FlashAttentionBackwardSm90:
             tiled_mma_SdP,
             sdS_cpy,
             tidx,
-            self.arch,
             transpose=self.SdP_swapAB,
             position_independent=True,
             major_mode_size=mms_PdS,
@@ -1644,7 +1624,6 @@ class FlashAttentionBackwardSm90:
                 tiled_mma_dV,
                 sdV,
                 tidx,
-                self.arch,
                 transpose=self.dKV_swapAB,
                 position_independent=True,
             )
@@ -1652,7 +1631,6 @@ class FlashAttentionBackwardSm90:
                 tiled_mma_dK,
                 sdK,
                 tidx,
-                self.arch,
                 transpose=self.dKV_swapAB,
                 position_independent=True,
             )

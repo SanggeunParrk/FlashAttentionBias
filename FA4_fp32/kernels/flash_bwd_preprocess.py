@@ -124,17 +124,14 @@ class FlashAttentionBackwardPreprocess:
     @cute.jit
     def __call__(
         self,
-        mO: cute.Tensor,  # (batch, seqlen, nheads, head_dim_v) or (total_q, nheads, head_dim_v)
-        mdO: cute.Tensor,  # same shape as mO
-        mPdPsum: cute.Tensor,  # (batch, nheads, seqlen_padded) or (nheads, total_q_padded)
-        mLSE: Optional[cute.Tensor],  # (batch, nheads, seqlen) or (nheads, total_q)
-        mLSElog2: Optional[cute.Tensor],  # same shape as mPdPsum
-        # (batch, nheads, seqlen_padded * head_dim_v) or (nheads, total_q_padded * head_dim_v)
-        mdQaccum: Optional[cute.Tensor],
-        mCuSeqlensQ: Optional[cute.Tensor],  # (batch + 1,)
-        mSeqUsedQ: Optional[cute.Tensor],  # (batch,)
-        mdLSE: Optional[cute.Tensor],  # (batch, nheads, seqlen) or (nheads, total_q)
-        # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
+        mO: cute.Tensor,        # (batch, seqlen, nheads, head_dim_v)
+        mdO: cute.Tensor,       # same shape as mO
+        mPdPsum: cute.Tensor,   # (batch, nheads, seqlen_padded)
+        mLSE: Optional[cute.Tensor],     # (batch, nheads, seqlen)
+        mLSElog2: Optional[cute.Tensor], # same shape as mPdPsum
+        mdQaccum: Optional[cute.Tensor], # (batch, nheads, seqlen_padded * head_dim_v)
+        mdLSE: Optional[cute.Tensor],    # (batch, nheads, seqlen)
+        # Always keep stream as the last parameter (EnvStream via TVM FFI).
         stream: cuda.CUstream = None,
     ):
         # Get the data type and check if it is fp16 or bf16
@@ -159,38 +156,25 @@ class FlashAttentionBackwardPreprocess:
 
         self._setup_attributes()
 
-        # (batch, nheads, seqlen) -> (seqlen, nheads, batch) or (total_q, nheads) -> (nheads, total_q)
-        transpose = [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
-        mPdPsum = layout_utils.select(mPdPsum, transpose)
+        # (batch, nheads, seqlen) -> (seqlen, nheads, batch)
+        mPdPsum = layout_utils.select(mPdPsum, [2, 1, 0])
         if const_expr(mLSE is not None):
-            mLSE = layout_utils.select(mLSE, transpose)
-            mLSElog2 = layout_utils.select(mLSElog2, transpose)
+            mLSE = layout_utils.select(mLSE, [2, 1, 0])
+            mLSElog2 = layout_utils.select(mLSElog2, [2, 1, 0])
         if const_expr(mdLSE is not None):
-            mdLSE = layout_utils.select(mdLSE, transpose)
+            mdLSE = layout_utils.select(mdLSE, [2, 1, 0])
         if const_expr(mdQaccum is not None):
-            mdQaccum = layout_utils.select(mdQaccum, transpose)
+            mdQaccum = layout_utils.select(mdQaccum, [2, 1, 0])
 
-        if const_expr(mCuSeqlensQ is not None):
-            TileScheduler = SingleTileVarlenScheduler
-            num_head = mO.shape[1]
-            num_batch = mCuSeqlensQ.shape[0] - 1
-        else:
-            TileScheduler = SingleTileScheduler
-            num_head = mO.shape[2]
-            num_batch = mO.shape[0]
-
+        TileScheduler = SingleTileScheduler
         tile_sched_args = TileSchedulerArguments(
             num_block=cute.ceil_div(mO.shape[1], self.tile_m),
-            num_head=num_head,
-            num_batch=num_batch,
-            num_splits=1,
+            num_head=mO.shape[2],
+            num_batch=mO.shape[0],
             seqlen_k=0,
             headdim=0,
             headdim_v=mO.shape[2],
-            total_q=mO.shape[0],
-            tile_shape_mn=(self.tile_m, 1),
-            mCuSeqlensQ=mCuSeqlensQ,
-            mSeqUsedQ=mSeqUsedQ,
+            element_size=mO.element_type.width // 8,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
@@ -203,8 +187,6 @@ class FlashAttentionBackwardPreprocess:
             mLSE,
             mLSElog2,
             mdQaccum,
-            mCuSeqlensQ,
-            mSeqUsedQ,
             mdLSE,
             self.gmem_tiled_copy_O,
             self.gmem_tiled_copy_dQaccum,
@@ -226,8 +208,6 @@ class FlashAttentionBackwardPreprocess:
         mLSE: Optional[cute.Tensor],
         mLSElog2: Optional[cute.Tensor],
         mdQaccum: Optional[cute.Tensor],
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mSeqUsedQ: Optional[cute.Tensor],
         mdLSE: Optional[cute.Tensor],
         gmem_tiled_copy_O: cute.TiledCopy,
         gmem_tiled_copy_dQaccum: cute.TiledCopy,
@@ -245,9 +225,7 @@ class FlashAttentionBackwardPreprocess:
             # ///////////////////////////////////////////////////////////////////////////////
             # Get the appropriate tiles for this thread block.
             # ///////////////////////////////////////////////////////////////////////////////
-            seqlen = SeqlenInfo.create(
-                batch_idx, mO.shape[1], mCuSeqlensQ, mSeqUsedQ, tile=self.tile_m
-            )
+            seqlen = SeqlenInfo.create(batch_idx, mO.shape[1])
             mO_cur = seqlen.offset_batch(mO, batch_idx, dim=0)[None, head_idx, None]
             mdO_cur = seqlen.offset_batch(mdO, batch_idx, dim=0)[None, head_idx, None]
             mPdPsum_cur = seqlen.offset_batch(mPdPsum, batch_idx, dim=2, padded=True)[

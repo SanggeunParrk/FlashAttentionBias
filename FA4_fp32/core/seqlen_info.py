@@ -53,7 +53,17 @@ class SeqlenInfo:
     def create(batch_idx: Int32, seqlen_q_static: Int32, **_ignored):
         return SeqlenInfo(seqlen_q_static)
 
+    @property
+    def seqlen(self) -> Int32:
+        return self.seqlen_q
+
     def offset_batch_Q(self, mQ: cute.Tensor, batch_idx: Int32, dim: int,
                        **_ignored) -> cute.Tensor:
         idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mQ) - 1 - dim)
         return mQ[idx]
+
+    def offset_batch(self, mT: cute.Tensor, batch_idx: Int32, dim: int,
+                     **_ignored) -> cute.Tensor:
+        """Generic (Q/dPsum/LSE/dQaccum) batch offset; swallows padded/ragged kwargs."""
+        idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mT) - 1 - dim)
+        return mT[idx]
