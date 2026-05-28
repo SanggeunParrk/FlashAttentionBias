@@ -9,10 +9,8 @@ except PackageNotFoundError:
 
 import cutlass.cute as cute
 
-from .interface import (
-    flash_attn_func,
-    flash_attn_varlen_func,
-)
+# Varlen API was removed in the B200-style strip (MHA happy path only).
+from .interface import flash_attn_func
 
 from FA4_fp32.infra.cute_dsl_utils import cute_compile_patched
 
@@ -22,5 +20,4 @@ cute.compile = cute_compile_patched
 
 __all__ = [
     "flash_attn_func",
-    "flash_attn_varlen_func",
 ]

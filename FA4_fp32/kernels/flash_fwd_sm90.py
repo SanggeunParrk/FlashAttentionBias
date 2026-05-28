@@ -177,7 +177,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         mPageTable: Optional[cute.Tensor] = None,  # (b_k, max_num_pages_per_seq)
         window_size_left: Int32 | int | None = None,
         window_size_right: Int32 | int | None = None,
-        learnable_sink: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -380,7 +379,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             softmax_scale,
             window_size_left,
             window_size_right,
-            learnable_sink,
             blocksparse_tensors,
             self.sQ_layout,
             self.sK_layout,
@@ -426,7 +424,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         softmax_scale: Optional[Float32],
         window_size_left: Optional[Int32],
         window_size_right: Optional[Int32],
-        learnable_sink: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
@@ -616,7 +613,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 sVt,
                 sP,
                 sO,
-                learnable_sink,
                 pipeline_k,
                 pipeline_v,
                 pipeline_q,
@@ -943,7 +939,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         sVt: cute.Tensor,
         sP: Optional[cute.Tensor],
         sO: cute.Tensor,
-        learnable_sink: Optional[cute.Tensor],
         pipeline_k: pipeline.PipelineAsync,
         pipeline_v: pipeline.PipelineAsync,
         pipeline_q: pipeline.PipelineAsync,
@@ -1239,21 +1234,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
 
             q_consumer_phase ^= 1
 
-            sink_val = None
-            if const_expr(learnable_sink is not None):
-                if const_expr(not self.pack_gqa):
-                    sink_val = Float32(learnable_sink[head_idx])
-                else:  # Each thread might have a different sink value due to different q_head
-                    sink_val = cute.make_rmem_tensor_like(softmax.row_max, Float32)
-                    cS = cute.make_identity_tensor((self.tile_m, self.tile_n))
-                    tScS_mn = layout_utils.reshape_acc_to_mn(thr_mma_qk.partition_C(cS))
-                    for r in cutlass.range(cute.size(sink_val), unroll_full=True):
-                        row = m_block * self.tile_m + tScS_mn[r][0]
-                        q_head_idx = row % self.qhead_per_kvhead + head_idx * self.qhead_per_kvhead
-                        sink_val[r] = Float32(learnable_sink[q_head_idx])
-
+            # learnable_sink path removed in the B200-style strip.
             # normalize acc_O by row_sum and calculate the lse
-            row_scale = softmax.finalize(sink_val=sink_val)
+            row_scale = softmax.finalize(sink_val=None)
             softmax.rescale_O(acc_O, row_scale)
 
             # ///////////////////////////////////////////////////////////////////////////////
