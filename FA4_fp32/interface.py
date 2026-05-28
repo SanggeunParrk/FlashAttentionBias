@@ -385,7 +385,9 @@ def _flash_attn_fwd(
     assert seqused_k is None or seqused_k.shape == (batch_size,), (
         "seqused_k must have shape (batch_size,)"
     )
-    assert q.dtype in [torch.float16, torch.bfloat16], "inputs must be float16 or bfloat16"
+    assert q.dtype in [torch.float16, torch.bfloat16, torch.float32], (
+        "inputs must be float16, bfloat16, or float32 (TF32 MMA)"
+    )
     assert q.dtype == k.dtype == v.dtype, "inputs must have the same dtype"
     for t in [cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k]:
         if t is not None:
@@ -502,6 +504,14 @@ def _flash_attn_fwd(
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
         q_stage = 1
+
+    # fp32 I/O uses 2x smem vs fp16/bf16. SM100 path already forces a smaller
+    # tile below; the SM90 path needs the same treatment because Hopper SMEM
+    # is 228KB/SM and Q+K+V tiles at fp32 + num_stages=2 don't fit at 128x128.
+    if q.dtype == torch.float32 and arch // 10 == 9:
+        if tile_mn is None:
+            tile_m, tile_n = 128, 64
+            fwd_cfg = FwdConfig(tile_m, tile_n, fwd_cfg.mma_pv_is_rs, fwd_cfg.intra_wg_overlap)
 
     m_block_size_effective = q_stage * tile_m
     seqlen_k_loaded = max_seqlen_k if not local else max(0, min(max_seqlen_k, (window_size_right or max_seqlen_k) + (window_size_left or max_seqlen_k) + 1 + tile_m))
@@ -709,8 +719,9 @@ def _flash_attn_fwd(
                 pack_gqa=pack_gqa,
                 tile_m=tile_m,
                 tile_n=tile_n,
-                # num_stages=1,
-                num_stages=2,
+                # fp32 doubles per-stage SMEM cost; one K/V stage keeps the
+                # tile within H100's 228 KB SMEM budget.
+                num_stages=1 if q.dtype == torch.float32 else 2,
                 num_threads=num_threads,
                 Q_in_regs=False,
                 intra_wg_overlap=intra_wg_overlap,

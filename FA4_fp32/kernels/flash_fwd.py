@@ -139,21 +139,24 @@ class FlashAttentionForwardBase:
         :return: True if the kernel can be implemented, False otherwise
         :rtype: bool
         """
-        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
+        if dtype not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]:
             return False
-        if head_dim % 8 != 0:
+        # 16-byte alignment in elements: 8 for fp16/bf16, 4 for fp32.
+        align = 16 // (dtype.width // 8)
+        if head_dim % align != 0:
             return False
-        if head_dim_v % 8 != 0:
+        if head_dim_v % align != 0:
             return False
         if tile_n % 16 != 0:
             return False
         if num_threads % 32 != 0:
             return False
-        # Check if block size setting is out of shared memory capacity
-        # Shared memory usage: Q tile + (K tile + V tile) where K and V use the same tile size
-        smem_usage_Q = tile_m * head_dim * 2
-        smem_usage_K = tile_n * head_dim * num_stages * 2
-        smem_usage_V = tile_n * head_dim_v * num_stages * 2
+        # Check if block size setting is out of shared memory capacity.
+        # Shared memory usage scales with bytes-per-element.
+        bytes_per_elem = dtype.width // 8
+        smem_usage_Q = tile_m * head_dim * bytes_per_elem
+        smem_usage_K = tile_n * head_dim * num_stages * bytes_per_elem
+        smem_usage_V = tile_n * head_dim_v * num_stages * bytes_per_elem
         smem_usage_QV = (
             (smem_usage_Q + smem_usage_V) if not Q_in_regs else max(smem_usage_Q, smem_usage_V)
         )
@@ -179,11 +182,11 @@ class FlashAttentionForwardBase:
         mSeqUsedQ_type: Type[cutlass.Numeric] | None,
         mSeqUsedK_type: Type[cutlass.Numeric] | None,
     ):
-        # Get the data type and check if it is fp16 or bf16
+        # Q/K/V/O must share dtype; allow fp16/bf16/fp32 (fp32 uses TF32 MMA).
         if const_expr(not (mQ_type == mK_type == mV_type == mO_type)):
             raise TypeError("All tensors must have the same data type")
-        if const_expr(mQ_type not in [cutlass.Float16, cutlass.BFloat16]):
-            raise TypeError("Only Float16 or BFloat16 is supported")
+        if const_expr(mQ_type not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]):
+            raise TypeError("Only Float16, BFloat16, or Float32 (TF32 MMA) is supported")
         if const_expr(mLSE_type not in [None, Float32]):
             raise TypeError("LSE tensor must be Float32")
         if const_expr(mCuSeqlensQ_type not in [None, Int32]):

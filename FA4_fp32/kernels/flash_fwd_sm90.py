@@ -13,6 +13,7 @@ from cutlass import Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.utils import LayoutEnum
 import cutlass.utils.hopper_helpers as sm90_utils_basic
+from FA4_fp32.arch import hopper_helpers as sm90_utils_fp32
 from cutlass import pipeline
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.base_dsl.arch import Arch
@@ -93,7 +94,14 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         return sQ_layout_atom, sK_layout_atom, sV_layout_atom, sO_layout_atom, sP_layout_atom
 
     def _get_tiled_mma(self):
-        tiled_mma_qk = sm90_utils_basic.make_trivial_tiled_mma(
+        # fp32 (TF32 MMA) on SM90 isn't covered by upstream hopper_helpers, so
+        # we route through the project-local helper which adds a Float32 branch.
+        _mma_helper = (
+            sm90_utils_fp32
+            if self.dtype is Float32 or self.dtype is cutlass.TFloat32
+            else sm90_utils_basic
+        )
+        tiled_mma_qk = _mma_helper.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,
             warpgroup.OperandMajorMode.K,
@@ -102,7 +110,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             atom_layout_mnk=(self.tile_m // 64, 1, 1),
             tiler_mn=(64, self.tile_n),
         )
-        tiled_mma_pv = sm90_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_pv = _mma_helper.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,
             warpgroup.OperandMajorMode.K,

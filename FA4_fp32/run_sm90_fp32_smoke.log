@@ -1,0 +1,11 @@
+=== node: node01
+NVIDIA H100 80GB HBM3, 575.51.03
+=== installing nvidia-cutlass-dsl (cu12) + apache-tvm-ffi + torch_c_dlpack_ext + quack-kernels
+Collecting nvidia-cutlass-dsl
+  Using cached nvidia_cutlass_dsl-4.5.2-py3-none-any.whl.metadata (2.8 kB)
+Using cached nvidia_cutlass_dsl-4.5.2-py3-none-any.whl (10 kB)
+Installing collected packages: nvidia-cutlass-dsl
+Successfully installed nvidia-cutlass-dsl-4.5.2
+ERROR: Could not find a version that satisfies the requirement nvidia-cutlass-dsl-libs-cu12 (from versions: none)
+ERROR: No matching distribution found for nvidia-cutlass-dsl-libs-cu12
+srun: error: node01: task 0: Exited with exit code 1
