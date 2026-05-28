@@ -52,8 +52,6 @@ from quack.cute_dsl_utils import ParamsBase
 from FA4_fp32.core.tile_scheduler import (
     TileSchedulerArguments,
     SingleTileScheduler,
-    SingleTileLPTScheduler,
-    SingleTileVarlenScheduler,
 )
 from cutlass.cute import FastDivmodDivisor
 
@@ -327,34 +325,16 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 self.sO_layout,
                 (self.tile_m, self.tile_hdimv),  # No mcast
             )
-        if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None):
-            TileScheduler = SingleTileVarlenScheduler
-        else:
-            TileScheduler = (
-                SingleTileScheduler
-                if const_expr(not self.is_causal or self.is_local)
-                else SingleTileLPTScheduler
-            )
+        # Stripped path: MHA, non-causal, non-varlen → always SingleTileScheduler.
+        TileScheduler = SingleTileScheduler
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mQ.shape[0]), self.tile_m),
-            cute.size(mQ.shape[2]),
-            cute.size(mQ.shape[3])
-            if const_expr(mCuSeqlensQ is None)
-            else cute.size(mCuSeqlensQ.shape[0] - 1),
-            1,  # num_splits
-            cute.size(mK.shape[0]),  # paged_kv stripped
-            mQ.shape[1],
-            mV.shape[1],
-            total_q=cute.size(mQ.shape[0])
-            if const_expr(mCuSeqlensQ is not None)
-            else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
-            tile_shape_mn=(self.tile_m, self.tile_n),
-            mCuSeqlensQ=mCuSeqlensQ,
-            mSeqUsedQ=mSeqUsedQ,
-            qhead_per_kvhead_packgqa=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+            num_block=cute.ceil_div(cute.size(mQ.shape[0]), self.tile_m),
+            num_head=cute.size(mQ.shape[2]),
+            num_batch=cute.size(mQ.shape[3]),
+            seqlen_k=cute.size(mK.shape[0]),
+            headdim=mQ.shape[1],
+            headdim_v=mV.shape[1],
             element_size=self.dtype.width // 8,
-            is_persistent=False,
-            lpt=self.is_causal or self.is_local,
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)

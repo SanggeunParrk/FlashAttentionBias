@@ -125,45 +125,14 @@ def hash_callable(
     return hasher.hexdigest()
 
 
-def create_softcap_scoremod(softcap_val):
-    @cute.jit
-    def scoremod_premask_fn(
-        acc_S_SSA, batch_idx, head_idx, q_idx, kv_idx, seqlen_info, aux_tensors
-    ):
-        scores = acc_S_SSA / softcap_val
-        return softcap_val * cute.math.tanh(scores, fastmath=True)
-
-    return scoremod_premask_fn
-
-
-def create_softcap_scoremod_bwd(softcap_val):
-    @cute.jit
-    def scoremod_bwd_fn(
-        grad_out_SSA, score_SSA, batch_idx, head_idx, q_idx, kv_idx, seqlen_info, aux_tensors
-    ):
-        scores = score_SSA / softcap_val
-        tanh_scores = cute.math.tanh(scores, fastmath=True)
-        return grad_out_SSA * (1.0 - tanh_scores * tanh_scores)
-
-    return scoremod_bwd_fn
-
-
+# softcap / score_mod were stripped from this build.
 LOG2_E = math.log2(math.e)
 
 
-def compute_softmax_scale_log2(softmax_scale, score_mod):
-    """Compute softmax_scale_log2 and adjusted softmax_scale based on whether score_mod is used.
-
-    When score_mod is None, fold the log2(e) factor into softmax_scale_log2 and set softmax_scale
-    to None. When score_mod is present, keep softmax_scale separate so it can be applied before
-    the score_mod, and set softmax_scale_log2 to just the change-of-base constant.
-
-    Returns (softmax_scale_log2, softmax_scale).
-    """
-    if const_expr(score_mod is None):
-        return softmax_scale * LOG2_E, None
-    else:
-        return LOG2_E, softmax_scale
+def compute_softmax_scale_log2(softmax_scale, score_mod=None):
+    """Fold log2(e) into softmax_scale (no score_mod in this build)."""
+    # score_mod kept in signature only for call-site compatibility; ignored.
+    return softmax_scale * LOG2_E, None
 
 
 def compute_fastdiv_mods(mQ, mK, qhead_per_kvhead, pack_gqa, aux_tensors, mPageTable=None):
