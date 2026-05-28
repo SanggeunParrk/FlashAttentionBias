@@ -172,13 +172,9 @@ def _flash_attn_fwd(
             num_stages=num_stages,
             num_threads=num_threads,
             Q_in_regs=False,
-            score_mod=None,
-            mask_mod=None,
-            has_aux_tensors=False,
             q_subtile_factor=None,
             intra_wg_overlap=True,
             mma_pv_is_rs=True,
-            paged_kv_non_tma=False,
         )
         _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
             fa_fwd,

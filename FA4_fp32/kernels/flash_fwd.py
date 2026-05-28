@@ -53,9 +53,6 @@ class FlashAttentionForwardBase:
         num_stages: int = 1,
         num_threads: int = 128,
         Q_in_regs: bool = False,
-        score_mod: Optional[cutlass.Constexpr] = None,
-        mask_mod: Optional[cutlass.Constexpr] = None,
-        has_aux_tensors: bool = False,
         q_subtile_factor: int | None = None,
     ):
         """Initializes the configuration for a flash attention kernel.
@@ -63,19 +60,8 @@ class FlashAttentionForwardBase:
         All contiguous dimensions must be at least 16 bytes aligned, which means that the head dimension
         should be a multiple of 8.
 
-        :param head_dim: head dimension
-        :type head_dim: int
-        :param tile_m: m block size
-        :type tile_m: int
-        :param tile_n: n block size
-        :type tile_n: int
-        :param num_threads: number of threads
-        :type num_threads: int
-        :param is_causal: is causal
-        :param score_mod: A callable that takes the attention scores and applies a modification.
-            Callable signature: ``score_mod(scores, batch_idx, head_idx, q_idx, kv_idx, aux_tensors) -> Any``
-        :param mask_mod: A callable that takes the attention scores and returns a boolean representing whether that score should be masked.
-            Callable signature: ``mask_mod(batch_idx, head_idx, q_idx, kv_idx, aux_tensors) -> Boolean``
+        score_mod / mask_mod / has_aux_tensors were stripped — this build only
+        runs the MHA happy path (no FlexAttention, no softcap, no learnable_sink).
         """
         self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -97,17 +83,13 @@ class FlashAttentionForwardBase:
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
         self.Q_in_regs = Q_in_regs
-        self.score_mod = score_mod
-        self.mask_mod = mask_mod
+        # score_mod / mask_mod attributes kept as None for the const_expr branches
+        # in the kernel body that still reference them; will be removed alongside
+        # those branches in a later pass.
+        self.score_mod = None
+        self.mask_mod = None
         self.qk_acc_dtype = Float32
-        self.vec_size: cutlass.Constexpr = getattr(
-            score_mod, "__vec_size__", 1 if cutlass.const_expr(has_aux_tensors) else 2
-        )
-        if self.vec_size > 2:
-            raise ValueError(
-                f"score_mod vec_size {self.vec_size} not supported on Sm80/90/120 "
-                "due to accumulator thread ownership pattern."
-            )
+        self.vec_size: cutlass.Constexpr = 2  # has_aux_tensors removed
         self.arch = BaseDSL._get_dsl().get_arch_enum()
 
     @staticmethod
